@@ -1,0 +1,24 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "oneconnect-a3007",
+          "appId": "1:894480209963:android:8c8dc3f03e563b8ad6326e",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "oneconnect-a3007",
+          "configurations": {
+            "android": "1:894480209963:android:8c8dc3f03e563b8ad6326e"
+          }
+        }
+      }
+    }
+  }
+}

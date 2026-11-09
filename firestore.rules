@@ -1,0 +1,266 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    // Signed in AND email verified. Anonymous / unverified users get nothing.
+    function verified() {
+      return request.auth != null &&
+        request.auth.token.email_verified == true;
+    }
+
+    function roomPath(roomId) {
+      return /databases/$(database)/documents/rooms/$(roomId);
+    }
+
+    // Checks against a room's own data (the room doc, or get(...).data).
+    function isMemberOf(room) {
+      return verified() && room.memberUids.hasAny([request.auth.uid]);
+    }
+
+    function isOwnerOf(room) {
+      return verified() && room.ownerUid == request.auth.uid;
+    }
+
+    // For sub-collections (joinRequests, messages), which need a lookup.
+    function isMember(roomId) {
+      return exists(roomPath(roomId)) && isMemberOf(get(roomPath(roomId)).data);
+    }
+
+    function isOwner(roomId) {
+      return exists(roomPath(roomId)) && isOwnerOf(get(roomPath(roomId)).data);
+    }
+
+    // A member entry in the room's "members" map.
+    function validMember(m) {
+      return m.size() <= 4 &&
+        m.keys().hasAll(['displayName', 'publicKey']) &&
+        m.displayName is string &&
+        m.displayName.size() > 0 &&
+        m.displayName.size() <= 80 &&
+        m.publicKey is string &&
+        m.publicKey.size() == 44;
+    }
+
+    // ------------------------------------------------------------------
+    // Rooms
+    // ------------------------------------------------------------------
+    match /rooms/{roomId} {
+
+      // Only members can read a room. Queries (watchMyRooms) must filter by
+      // memberUids array-contains the signed-in uid.
+      allow get, list: if isMemberOf(resource.data);
+
+      // Anyone verified can create a room, but only as its sole owner/member.
+      allow create: if verified() &&
+        roomId.matches('[A-Z0-9]{6}') &&
+        request.resource.data.keys().hasOnly([
+          'ownerUid', 'memberUids', 'members', 'verifiedUids', 'closed', 'createdAt'
+        ]) &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.memberUids == [request.auth.uid] &&
+        request.resource.data.members.keys().hasOnly([request.auth.uid]) &&
+        validMember(request.resource.data.members[request.auth.uid]) &&
+        request.resource.data.verifiedUids == [] &&
+        request.resource.data.closed == false &&
+        request.resource.data.createdAt == request.time;
+
+      // OWNER ONLY: approve a join request (adds the second member).
+      allow update: if isOwnerOf(resource.data) &&
+        resource.data.closed == false &&
+        resource.data.memberUids.size() == 1 &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'memberUids', 'members'
+        ]) &&
+        request.resource.data.memberUids.size() == 2 &&
+        request.resource.data.memberUids[0] == resource.data.ownerUid &&
+        request.resource.data.memberUids[1] != resource.data.ownerUid &&
+        !(request.resource.data.memberUids[1] in resource.data.members.keys()) &&
+        request.resource.data.members.keys().hasOnly(
+          request.resource.data.memberUids
+        ) &&
+        request.resource.data.members.keys().hasAll(
+          request.resource.data.memberUids
+        ) &&
+        request.resource.data.members[resource.data.ownerUid] ==
+          resource.data.members[resource.data.ownerUid] &&
+        validMember(
+          request.resource.data.members[request.resource.data.memberUids[1]]
+        ) &&
+        // The key stored for the joiner must be the one THEY submitted, so
+        // an owner can't swap in a different key.
+        request.resource.data.members[request.resource.data.memberUids[1]]
+          .publicKey ==
+          getAfter(
+            /databases/$(database)/documents/rooms/$(roomId)/joinRequests/$(request.resource.data.memberUids[1])
+          ).data.publicKey &&
+        getAfter(
+          /databases/$(database)/documents/rooms/$(roomId)/joinRequests/$(request.resource.data.memberUids[1])
+        ).data.status == 'approved';
+
+      // A member marks their own safety code as verified (once).
+      allow update: if isMemberOf(resource.data) &&
+        resource.data.closed == false &&
+        resource.data.memberUids.size() == 2 &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['verifiedUids']) &&
+        !(request.auth.uid in resource.data.verifiedUids) &&
+        request.resource.data.verifiedUids.hasAll(resource.data.verifiedUids) &&
+        request.resource.data.verifiedUids.size() ==
+          resource.data.verifiedUids.size() + 1 &&
+        request.resource.data.verifiedUids.hasAny([request.auth.uid]);
+
+      // A member leaves the room (the room closes).
+      allow update: if isMemberOf(resource.data) &&
+        request.resource.data.closed == true &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'ownerUid', 'memberUids', 'members', 'closed'
+        ]) &&
+        request.resource.data.memberUids.size() <= 1 &&
+        resource.data.memberUids.size() ==
+          request.resource.data.memberUids.size() + 1 &&
+        resource.data.memberUids.hasAll(request.resource.data.memberUids) &&
+        !request.resource.data.memberUids.hasAny([request.auth.uid]) &&
+        request.resource.data.members.keys().hasOnly(
+          request.resource.data.memberUids
+        ) &&
+        request.resource.data.members.keys().hasAll(
+          request.resource.data.memberUids
+        ) &&
+        ((request.resource.data.memberUids.size() == 0 &&
+            request.resource.data.ownerUid == resource.data.ownerUid &&
+            request.resource.data.members.size() == 0) ||
+          (request.resource.data.memberUids.size() == 1 &&
+            request.resource.data.ownerUid ==
+              request.resource.data.memberUids[0] &&
+            request.resource.data.members[request.resource.data.ownerUid] ==
+              resource.data.members[request.resource.data.ownerUid]));
+
+      allow delete: if false;
+
+      // ----------------------------------------------------------------
+      // Join requests
+      // ----------------------------------------------------------------
+      match /joinRequests/{requesterUid} {
+
+        // A user can only create a request for THEMSELVES, in an open room
+        // that still has room for one more person.
+        allow create: if verified() &&
+          request.auth.uid == requesterUid &&
+          request.resource.data.keys().hasOnly([
+            'requesterUid', 'displayName', 'publicKey', 'status', 'createdAt'
+          ]) &&
+          request.resource.data.requesterUid == requesterUid &&
+          request.resource.data.status == 'pending' &&
+          request.resource.data.displayName is string &&
+          request.resource.data.displayName.size() > 0 &&
+          request.resource.data.displayName.size() <= 80 &&
+          request.resource.data.publicKey is string &&
+          request.resource.data.publicKey.size() == 44 &&
+          request.resource.data.createdAt == request.time &&
+          exists(roomPath(roomId)) &&
+          get(roomPath(roomId)).data.closed == false &&
+          get(roomPath(roomId)).data.memberUids.size() == 1 &&
+          !get(roomPath(roomId)).data.memberUids.hasAny([requesterUid]);
+
+        // Only the requester and the room owner can see a request.
+        allow get, list: if verified() &&
+          (request.auth.uid == requesterUid || isOwner(roomId));
+
+        // OWNER ONLY: approve or reject a pending request.
+        allow update: if isOwner(roomId) &&
+          resource.data.status == 'pending' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status', 'updatedAt'
+          ]) &&
+          request.resource.data.status in ['approved', 'rejected'] &&
+          request.resource.data.updatedAt == request.time &&
+          (request.resource.data.status == 'rejected' ||
+            getAfter(roomPath(roomId)).data.memberUids.hasAny([requesterUid]));
+
+        // The requester can re-send a request that was rejected.
+        allow update: if verified() &&
+          request.auth.uid == requesterUid &&
+          resource.data.status == 'rejected' &&
+          request.resource.data.status == 'pending' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status', 'updatedAt'
+          ]) &&
+          request.resource.data.updatedAt == request.time &&
+          get(roomPath(roomId)).data.closed == false &&
+          get(roomPath(roomId)).data.memberUids.size() == 1;
+
+        allow delete: if false;
+      }
+
+      // ----------------------------------------------------------------
+      // Messages (end-to-end encrypted: the server only sees ciphertext)
+      // ----------------------------------------------------------------
+      match /messages/{messageId} {
+
+        allow get, list: if isMember(roomId);
+
+        allow create: if isMember(roomId) &&
+          messageId.matches('[0-9a-f]{32}') &&
+          get(roomPath(roomId)).data.closed == false &&
+          get(roomPath(roomId)).data.memberUids.size() == 2 &&
+          get(roomPath(roomId)).data.verifiedUids.hasAll(
+            get(roomPath(roomId)).data.memberUids
+          ) &&
+          request.resource.data.keys().hasOnly([
+            'senderUid', 'ciphertext', 'sentAt', 'seenBy', 'replyToId'
+          ]) &&
+          request.resource.data.senderUid == request.auth.uid &&
+          request.resource.data.ciphertext is string &&
+          request.resource.data.ciphertext.size() > 0 &&
+          request.resource.data.ciphertext.size() <= 4096 &&
+          request.resource.data.sentAt == request.time &&
+          request.resource.data.seenBy == [request.auth.uid] &&
+          // A reply must point at a message that already exists in this room.
+          (!('replyToId' in request.resource.data) ||
+            (request.resource.data.replyToId is string &&
+              request.resource.data.replyToId.matches('[0-9a-f]{32}') &&
+              exists(
+                /databases/$(database)/documents/rooms/$(roomId)/messages/$(request.resource.data.replyToId)
+              )));
+
+        // Mark the OTHER person's message as seen (once, by you only).
+        allow update: if isMember(roomId) &&
+          resource.data.senderUid != request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['seenBy']) &&
+          !(request.auth.uid in resource.data.seenBy) &&
+          request.resource.data.seenBy.hasAll(resource.data.seenBy) &&
+          request.resource.data.seenBy.size() == resource.data.seenBy.size() + 1 &&
+          request.resource.data.seenBy.hasAny([request.auth.uid]);
+
+        // Reactions: a member can add, change or remove ONLY their own entry
+        // in the "reactions" map (account id -> emoji), in an open room.
+        allow update: if isMember(roomId) &&
+          get(roomPath(roomId)).data.closed == false &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['reactions']) &&
+          request.resource.data.reactions is map &&
+          request.resource.data.reactions.diff(
+            resource.data.get('reactions', {})
+          ).affectedKeys().hasOnly([request.auth.uid]) &&
+          (!(request.auth.uid in request.resource.data.reactions) ||
+            (request.resource.data.reactions[request.auth.uid] is string &&
+              request.resource.data.reactions[request.auth.uid].size() >= 1 &&
+              request.resource.data.reactions[request.auth.uid].size() <= 16));
+
+        // Messages are never deleted, so both people always see the same history.
+        allow delete: if false;
+      }
+    }
+
+    // Everything not listed above is denied. (Firestore already does this by
+    // default; it is written out so nobody adds an open rule by accident.)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

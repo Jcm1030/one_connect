@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "894480209963",
+    "project_id": "oneconnect-a3007",
+    "storage_bucket": "oneconnect-a3007.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:894480209963:android:8c8dc3f03e563b8ad6326e",
+        "android_client_info": {
+          "package_name": "com.example.oneconnect"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCfq1VjA10M3mxbMyKXTL5SQD0LAExXdXg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
