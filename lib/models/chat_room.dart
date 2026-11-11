@@ -16,6 +16,9 @@ class ChatRoom {
   final Map<String, String> publicKeys = {};
   final Set<String> keyVerifiedUids = {};
   bool online = false;
+  // A guest room is a chat started from a username search and a talk request.
+  // It does not count as your roommate room.
+  bool guest = false;
   String? ownerUid;
   bool closed = false;
 

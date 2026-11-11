@@ -3,8 +3,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:oneconnect/app.dart';
 import 'package:oneconnect/app_state.dart';
 import 'package:oneconnect/models/app_settings.dart';
+import 'package:oneconnect/screens/profile_screen.dart';
 import 'package:oneconnect/screens/sign_in_screen.dart';
 
+import 'helpers/fake_account_service.dart';
 import 'helpers/fake_store.dart';
 
 // The first screen has a fade-in animation, so these tests use pump()
@@ -18,6 +20,20 @@ void main() {
 
   MediaQueryData mediaOfFirstScreen(WidgetTester tester) =>
       MediaQuery.of(tester.element(find.byType(SignInScreen)));
+
+  testWidgets('a signed-in user skips the sign-in screen', (tester) async {
+    final accountService = FakeAccountService();
+    await accountService.signUp('ana@example.com', 'password123');
+    final signedInAppState = AppState(
+      FakeStore(),
+      accountService: accountService,
+    );
+
+    await tester.pumpWidget(OneConnectApp(appState: signedInAppState));
+
+    expect(find.byType(ProfileScreen), findsOneWidget);
+    expect(find.byType(SignInScreen), findsNothing);
+  });
 
   testWidgets('the theme follows the Settings choice', (tester) async {
     appState.settings = const AppSettings(themeChoice: ThemeChoice.dark);

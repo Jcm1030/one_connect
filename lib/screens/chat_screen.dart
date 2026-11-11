@@ -904,12 +904,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Widget _buildInputBar({required bool enabled}) {
     final colors = Theme.of(context).colorScheme;
     return Container(
-      height: 100,
+      height: 70,
       width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
+      padding: const EdgeInsets.fromLTRB(10, 6, 6, 10),
       decoration: BoxDecoration(
-        color: const Color(0xFFF8F7F4),
-        border: Border.all(color: const Color(0xFFE7E7E1), width: 1),
+        color: colors.surface,
+        border: Border.all(color: colors.outlineVariant, width: 1),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
@@ -946,10 +946,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     ? 'Type a message'
                     : 'Verify the safety code to chat',
                 filled: true,
-                fillColor: Color.alphaBlend(
-                  colors.onSurface.withAlpha(16),
-                  colors.surface,
-                ),
+                fillColor: colors.surfaceContainerHighest,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(26),
                   borderSide: BorderSide.none,

@@ -4,10 +4,9 @@ import 'app_state.dart';
 import 'models/app_settings.dart';
 import 'models/profile.dart';
 import 'theme.dart';
+import 'screens/profile_screen.dart';
 import 'screens/sign_in_screen.dart';
 
-// The whole app: it picks the color from the current profile and applies
-// the Settings choices (theme, text size, animations).
 class OneConnectApp extends StatelessWidget {
   final AppState appState;
 
@@ -26,8 +25,10 @@ class OneConnectApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Rebuilds the whole app when the current user or a setting changes.
-    // Purple is used while nobody is selected.
+    final initialScreen = appState.accountService?.currentUser == null
+        ? SignInScreen(appState: appState)
+        : ProfileScreen(appState: appState);
+
     return ListenableBuilder(
       listenable: appState,
       builder: (context, _) {
@@ -43,8 +44,6 @@ class OneConnectApp extends StatelessWidget {
           themeAnimationDuration: settings.reduceAnimations
               ? Duration.zero
               : const Duration(milliseconds: 300),
-          // Applies the text size and the "reduce animations" choice to
-          // every screen at once.
           builder: (context, child) {
             final media = MediaQuery.of(context);
             final systemTextScale = media.textScaler.scale(1.0);
@@ -59,7 +58,7 @@ class OneConnectApp extends StatelessWidget {
               child: child!,
             );
           },
-          home: SignInScreen(appState: appState),
+          home: initialScreen,
         );
       },
     );

@@ -1,15 +1,21 @@
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../accounts/account_service.dart';
 import '../app_state.dart';
 import '../models/profile.dart';
+import '../online/username_service.dart';
+import '../ui_feedback.dart';
 import '../validation.dart';
 import '../widgets/screen_body.dart';
 
 // The optional online account. It shows one of three views:
 //   1. Not signed in: sign in, or create a new account.
 //   2. Signed in, email not verified yet: "check your email".
-//   3. Signed in and verified: link the account to the current profile.
+//   3. Signed in and verified: link the account to the current profile,
+//      and choose a unique username.
 // The app never saves the email or the password.
 class AccountScreen extends StatefulWidget {
   final AppState appState;
@@ -26,12 +32,21 @@ class _AccountScreenState extends State<AccountScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmController = TextEditingController();
+  final _usernameController = TextEditingController();
 
   bool _creatingAccount = false;
   bool _busy = false;
   String? _message; // an error or a short note shown at the top
   AccountUser? _user;
   bool _keysReady = false; // are this profile's keys stored on this phone?
+
+  // Username state.
+  final _usernameService = UsernameService();
+  Timer? _usernameDebounce;
+  bool _usernameLoaded = false;
+  String? _currentUsername; // the name saved online, or null if none yet
+  String? _usernameError; // shown in red under the field
+  String? _usernameHint; // shown in grey under the field
 
   AccountService get _service => widget.appState.accountService!;
   Profile get _profile => widget.profile ?? widget.appState.currentUser!;
@@ -43,6 +58,19 @@ class _AccountScreenState extends State<AccountScreen> {
     if (_profile.accountId != null) {
       _loadKeyStatus();
     }
+    if (_user?.emailVerified == true) {
+      _loadUsername();
+    }
+  }
+
+  @override
+  void dispose() {
+    _usernameDebounce?.cancel();
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmController.dispose();
+    _usernameController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadKeyStatus() async {
@@ -67,13 +95,134 @@ class _AccountScreenState extends State<AccountScreen> {
     });
   }
 
-  @override
-  void dispose() {
-    _emailController.dispose();
-    _passwordController.dispose();
-    _confirmController.dispose();
-    super.dispose();
+  // ---------- Username ----------
+
+  // Loads the saved username. If there is none yet, fills the field with a
+  // free suggestion that the person can edit.
+  Future<void> _loadUsername() async {
+    _usernameLoaded = true;
+    try {
+      final current = await _usernameService.currentUsername();
+      final text =
+          current ?? await _usernameService.suggestUsername(_profile.name);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _currentUsername = current;
+        _usernameController.text = text;
+        _usernameError = null;
+        _usernameHint = current == null
+            ? 'Suggested for you. You can change it.'
+            : null;
+      });
+    } on FirebaseException {
+      _usernameLoaded = false; // lets it try again next time
+      if (mounted) {
+        setState(() => _usernameError = 'Could not load your username.');
+      }
+    }
   }
+
+  // Clears everything about the username (used when signing out).
+  void _resetUsername() {
+    _usernameDebounce?.cancel();
+    _usernameLoaded = false;
+    _currentUsername = null;
+    _usernameError = null;
+    _usernameHint = null;
+    _usernameController.clear();
+  }
+
+  // Checks the name while typing: first the format, then, after a short
+  // pause, whether somebody already has it.
+  void _onUsernameChanged(String value) {
+    _usernameDebounce?.cancel();
+    final name = value.trim().toLowerCase();
+
+    if (name.isEmpty || name == _currentUsername) {
+      setState(() {
+        _usernameError = null;
+        _usernameHint = null;
+      });
+      return;
+    }
+    final problem = UsernameService.validate(name);
+    if (problem != null) {
+      setState(() {
+        _usernameError = problem;
+        _usernameHint = null;
+      });
+      return;
+    }
+
+    setState(() {
+      _usernameError = null;
+      _usernameHint = 'Checking…';
+    });
+    _usernameDebounce = Timer(const Duration(milliseconds: 400), () async {
+      try {
+        final free = await _usernameService.isAvailable(name);
+        // Ignore the answer if the person kept typing meanwhile.
+        if (!mounted || _usernameController.text.trim().toLowerCase() != name) {
+          return;
+        }
+        setState(() {
+          _usernameError = free ? null : 'That username is already taken.';
+          _usernameHint = free ? '@$name is available.' : null;
+        });
+      } on FirebaseException {
+        if (mounted) {
+          setState(() => _usernameHint = null);
+        }
+      }
+    });
+  }
+
+  Future<void> _saveUsername() async {
+    final input = _usernameController.text;
+    final problem = UsernameService.validate(input);
+    if (problem != null) {
+      setState(() => _usernameError = problem);
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _usernameError = null;
+    });
+    try {
+      final name = await _usernameService.setUsername(input);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _currentUsername = name;
+        _usernameController.text = name;
+        _usernameHint = null;
+      });
+      context.showAppMessage('Username set to @$name.');
+    } on FormatException catch (error) {
+      if (mounted) {
+        setState(() => _usernameError = error.message);
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        setState(() => _usernameError = error.message);
+      }
+    } on FirebaseException catch (error) {
+      if (mounted) {
+        context.showAppMessage(
+          'Could not save: ${error.message ?? error.code}',
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  // ---------- Account actions ----------
 
   // Runs one account action. While it runs the buttons are disabled, and if
   // it fails with an AccountException the friendly message is shown.
@@ -91,6 +240,10 @@ class _AccountScreenState extends State<AccountScreen> {
       return;
     }
     setState(() => _busy = false);
+    // Once the email is verified, load (or suggest) the username.
+    if (_user?.emailVerified == true && !_usernameLoaded) {
+      unawaited(_loadUsername());
+    }
   }
 
   Future<void> _submit() async {
@@ -153,6 +306,7 @@ class _AccountScreenState extends State<AccountScreen> {
     await _run(() async {
       await _service.signOut();
       _user = null;
+      _resetUsername();
     });
   }
 
@@ -410,6 +564,55 @@ class _AccountScreenState extends State<AccountScreen> {
     );
   }
 
+  // Choose or change the unique username other people can search for.
+  Widget _buildUsernameSection(BuildContext context) {
+    final theme = Theme.of(context);
+    final typed = _usernameController.text.trim().toLowerCase();
+    final canSave =
+        !_busy &&
+        typed.isNotEmpty &&
+        typed != _currentUsername &&
+        _usernameError == null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Username', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 4),
+        Text(
+          _currentUsername == null
+              ? 'Pick a unique username so people can find you.'
+              : 'People can find you as @$_currentUsername.',
+          style: theme.textTheme.bodySmall,
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _usernameController,
+          autocorrect: false,
+          enableSuggestions: false,
+          maxLength: 20,
+          onChanged: _onUsernameChanged,
+          decoration: InputDecoration(
+            labelText: 'Username',
+            prefixText: '@',
+            counterText: '',
+            errorMaxLines: 2,
+            errorText: _usernameError,
+            helperText:
+                _usernameHint ?? '3-20 letters, numbers or underscores.',
+          ),
+        ),
+        const SizedBox(height: 8),
+        FilledButton.tonal(
+          onPressed: canSave ? _saveUsername : null,
+          child: Text(
+            _currentUsername == null ? 'Save username' : 'Change username',
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildLink(BuildContext context, AccountUser user) {
     final profile = _profile;
     final linked = profile.accountId == user.id;
@@ -437,6 +640,9 @@ class _AccountScreenState extends State<AccountScreen> {
           const SizedBox(height: 8),
           _buildKeysSection(context),
         ],
+        const SizedBox(height: 24),
+        _buildUsernameSection(context),
+        const SizedBox(height: 8),
         TextButton(
           onPressed: _busy ? null : _signOut,
           child: const Text('Sign out'),

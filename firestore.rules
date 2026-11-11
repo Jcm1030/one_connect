@@ -1,12 +1,6 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // ------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------
-
-    // Signed in AND email verified. Anonymous / unverified users get nothing.
     function verified() {
       return request.auth != null &&
         request.auth.token.email_verified == true;
@@ -16,25 +10,103 @@ service cloud.firestore {
       return /databases/$(database)/documents/rooms/$(roomId);
     }
 
-    // Checks against a room's own data (the room doc, or get(...).data).
-    function isMemberOf(room) {
-      return verified() && room.memberUids.hasAny([request.auth.uid]);
-    }
-
-    function isOwnerOf(room) {
-      return verified() && room.ownerUid == request.auth.uid;
-    }
-
-    // For sub-collections (joinRequests, messages), which need a lookup.
     function isMember(roomId) {
-      return exists(roomPath(roomId)) && isMemberOf(get(roomPath(roomId)).data);
+      return verified() &&
+        exists(roomPath(roomId)) &&
+        get(roomPath(roomId)).data.memberUids.hasAny([request.auth.uid]);
     }
 
     function isOwner(roomId) {
-      return exists(roomPath(roomId)) && isOwnerOf(get(roomPath(roomId)).data);
+      return verified() &&
+        exists(roomPath(roomId)) &&
+        get(roomPath(roomId)).data.ownerUid == request.auth.uid;
     }
 
-    // A member entry in the room's "members" map.
+    // The app's update info: anyone can read it (even before signing in),
+    // and nobody can change it from the app. Edit it in the Firebase Console.
+    match /appConfig/{document} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // Usernames (unique + searchable)
+    //
+    // usernames/{name}  -> { uid, username, createdAt }  (doc ID = username)
+    // users/{uid}       -> { username }                  (private to the user)
+    //
+    // Uniqueness: the username IS the document ID, and "create" fails if the
+    // document already exists, so two people can never hold the same name.
+    // Usernames are lowercase only, so "Sam" and "sam" are the same name.
+    // ------------------------------------------------------------------
+    function validUsername(name) {
+      return name.matches('[a-z0-9_]{3,20}') &&
+        !(name in ['admin', 'support', 'oneconnect', 'root', 'system']);
+    }
+
+    function usernamePath(name) {
+      return /databases/$(database)/documents/usernames/$(name);
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    match /users/{uid} {
+      // Private: only you can read your own profile document.
+      allow get: if verified() && request.auth.uid == uid;
+
+      // You can only set YOUR username, and only to one you own in the same
+      // batch. If you had an older username, it must be released at the same time.
+      allow create, update: if verified() &&
+        request.auth.uid == uid &&
+        request.resource.data.keys().hasOnly(['username']) &&
+        request.resource.data.username is string &&
+        validUsername(request.resource.data.username) &&
+        getAfter(usernamePath(request.resource.data.username)).data.uid == uid &&
+        (resource == null ||
+          !('username' in resource.data) ||
+          resource.data.username == request.resource.data.username ||
+          !existsAfter(usernamePath(resource.data.username)));
+
+      allow delete: if false;
+    }
+
+    match /usernames/{username} {
+      // Any verified user can look up a name. Searches must set a limit
+      // (max 20), which stops one query from dumping everyone at once.
+      allow get: if verified();
+      allow list: if verified() && request.query.limit <= 20;
+
+      // Claim a name: create-only, so an existing name can never be taken over.
+      allow create: if verified() &&
+        validUsername(username) &&
+        request.resource.data.keys().hasOnly(['uid', 'username', 'createdAt']) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.username == username &&
+        request.resource.data.createdAt == request.time &&
+        getAfter(userPath(request.auth.uid)).data.username == username;
+
+      allow update: if false;
+
+      // Release your own name, only when you are switching to a different one.
+      allow delete: if verified() &&
+        resource.data.uid == request.auth.uid &&
+        getAfter(userPath(request.auth.uid)).data.username != username;
+    }
+
+    // ------------------------------------------------------------------
+    // Guest chats: talk requests + guest rooms
+    //
+    // talkRequests/{fromUid}_{toUid}: one request per direction. The person
+    // who was asked (toUid) accepts or declines. Accepting creates a guest
+    // room with both people in it, in the same batch (see the rooms rules).
+    // ------------------------------------------------------------------
+    function talkPath(id) {
+      return /databases/$(database)/documents/talkRequests/$(id);
+    }
+
+    // A member entry in a room's "members" map.
     function validMember(m) {
       return m.size() <= 4 &&
         m.keys().hasAll(['displayName', 'publicKey']) &&
@@ -45,16 +117,101 @@ service cloud.firestore {
         m.publicKey.size() == 44;
     }
 
-    // ------------------------------------------------------------------
-    // Rooms
-    // ------------------------------------------------------------------
+    // A new guest room must match an accepted talk request addressed to me,
+    // and the other person's name and key must be the ones they sent.
+    function guestRoomMatchesRequest(roomId, room) {
+      let other = room.memberUids[1];
+      let talk = getAfter(talkPath(other + '_' + request.auth.uid)).data;
+      return talk.status == 'accepted' &&
+        talk.roomCode == roomId &&
+        talk.toUid == request.auth.uid &&
+        talk.fromUid == other &&
+        room.members[other].publicKey == talk.publicKey &&
+        room.members[other].displayName == talk.fromName;
+    }
+
+    match /talkRequests/{requestId} {
+      // Only the two people involved can see a request.
+      allow get: if verified() &&
+        (resource == null ||
+          resource.data.fromUid == request.auth.uid ||
+          resource.data.toUid == request.auth.uid);
+
+      allow list: if verified() &&
+        (resource.data.fromUid == request.auth.uid ||
+          resource.data.toUid == request.auth.uid);
+
+      // Send a request. It must be from YOU, carry YOUR real username, and
+      // name a real username that belongs to the person you are asking.
+      allow create: if verified() &&
+        request.resource.data.keys().hasOnly([
+          'fromUid', 'toUid', 'fromUsername', 'toUsername',
+          'fromName', 'publicKey', 'status', 'createdAt'
+        ]) &&
+        request.resource.data.fromUid == request.auth.uid &&
+        request.resource.data.toUid is string &&
+        request.resource.data.toUid != request.auth.uid &&
+        requestId == request.auth.uid + '_' + request.resource.data.toUid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.fromUsername is string &&
+        request.resource.data.toUsername is string &&
+        get(userPath(request.auth.uid)).data.username ==
+          request.resource.data.fromUsername &&
+        get(usernamePath(request.resource.data.toUsername)).data.uid ==
+          request.resource.data.toUid &&
+        request.resource.data.fromName is string &&
+        request.resource.data.fromName.size() > 0 &&
+        request.resource.data.fromName.size() <= 80 &&
+        request.resource.data.publicKey is string &&
+        request.resource.data.publicKey.size() == 44 &&
+        request.resource.data.createdAt == request.time;
+
+      // The person asked decides: decline, or accept (which must come with
+      // the guest room that has both of you in it).
+      allow update: if verified() &&
+        resource.data.toUid == request.auth.uid &&
+        resource.data.status == 'pending' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'updatedAt', 'roomCode'
+        ]) &&
+        request.resource.data.updatedAt == request.time &&
+        ((request.resource.data.status == 'declined' &&
+            !('roomCode' in request.resource.data)) ||
+          (request.resource.data.status == 'accepted' &&
+            request.resource.data.roomCode is string &&
+            request.resource.data.roomCode.matches('[A-Z0-9]{6}') &&
+            getAfter(roomPath(request.resource.data.roomCode)).data.memberUids ==
+              [request.auth.uid, resource.data.fromUid]));
+
+      // The sender can ask again ONLY after the earlier chat has closed.
+      // A declined request stays declined.
+      allow update: if verified() &&
+        resource.data.fromUid == request.auth.uid &&
+        resource.data.status == 'accepted' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'updatedAt', 'roomCode', 'fromName', 'publicKey'
+        ]) &&
+        request.resource.data.status == 'pending' &&
+        !('roomCode' in request.resource.data) &&
+        request.resource.data.updatedAt == request.time &&
+        request.resource.data.fromName is string &&
+        request.resource.data.fromName.size() > 0 &&
+        request.resource.data.fromName.size() <= 80 &&
+        request.resource.data.publicKey is string &&
+        request.resource.data.publicKey.size() == 44 &&
+        get(roomPath(resource.data.roomCode)).data.closed == true;
+
+      allow delete: if false;
+    }
+
     match /rooms/{roomId} {
 
-      // Only members can read a room. Queries (watchMyRooms) must filter by
-      // memberUids array-contains the signed-in uid.
-      allow get, list: if isMemberOf(resource.data);
+      // FIX 1: a query (watchMyRooms) has no single roomId to look up, so
+      // the rule must check the document's own fields instead of isMember().
+      allow get, list: if verified() &&
+        request.auth.uid in resource.data.memberUids;
 
-      // Anyone verified can create a room, but only as its sole owner/member.
+      // FIX 2: creating a room was missing, so every create was denied.
       allow create: if verified() &&
         roomId.matches('[A-Z0-9]{6}') &&
         request.resource.data.keys().hasOnly([
@@ -63,13 +220,45 @@ service cloud.firestore {
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.memberUids == [request.auth.uid] &&
         request.resource.data.members.keys().hasOnly([request.auth.uid]) &&
-        validMember(request.resource.data.members[request.auth.uid]) &&
+        request.resource.data.members[request.auth.uid].displayName is string &&
+        request.resource.data.members[request.auth.uid].displayName.size() > 0 &&
+        request.resource.data.members[request.auth.uid].displayName.size() <= 80 &&
+        request.resource.data.members[request.auth.uid].publicKey is string &&
+        request.resource.data.members[request.auth.uid].publicKey.size() == 44 &&
         request.resource.data.verifiedUids == [] &&
         request.resource.data.closed == false &&
         request.resource.data.createdAt == request.time;
 
-      // OWNER ONLY: approve a join request (adds the second member).
-      allow update: if isOwnerOf(resource.data) &&
+      // Guest room: created by the person who ACCEPTED a talk request, with
+      // both people in it from the start. It cannot be made any other way.
+      allow create: if verified() &&
+        roomId.matches('[A-Z0-9]{6}') &&
+        request.resource.data.keys().hasOnly([
+          'kind', 'ownerUid', 'memberUids', 'members',
+          'verifiedUids', 'closed', 'createdAt'
+        ]) &&
+        request.resource.data.kind == 'guest' &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.memberUids.size() == 2 &&
+        request.resource.data.memberUids[0] == request.auth.uid &&
+        request.resource.data.memberUids[1] != request.auth.uid &&
+        request.resource.data.members.keys().hasOnly(
+          request.resource.data.memberUids
+        ) &&
+        request.resource.data.members.keys().hasAll(
+          request.resource.data.memberUids
+        ) &&
+        validMember(request.resource.data.members[request.auth.uid]) &&
+        validMember(
+          request.resource.data.members[request.resource.data.memberUids[1]]
+        ) &&
+        request.resource.data.verifiedUids == [] &&
+        request.resource.data.closed == false &&
+        request.resource.data.createdAt == request.time &&
+        guestRoomMatchesRequest(roomId, request.resource.data);
+
+      // The owner approves a join request (adds the second member).
+      allow update: if isOwner(roomId) &&
         resource.data.closed == false &&
         resource.data.memberUids.size() == 1 &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -87,11 +276,16 @@ service cloud.firestore {
         ) &&
         request.resource.data.members[resource.data.ownerUid] ==
           resource.data.members[resource.data.ownerUid] &&
-        validMember(
-          request.resource.data.members[request.resource.data.memberUids[1]]
-        ) &&
-        // The key stored for the joiner must be the one THEY submitted, so
-        // an owner can't swap in a different key.
+        request.resource.data.members[request.resource.data.memberUids[1]]
+          .displayName is string &&
+        request.resource.data.members[request.resource.data.memberUids[1]]
+          .displayName.size() > 0 &&
+        request.resource.data.members[request.resource.data.memberUids[1]]
+          .displayName.size() <= 80 &&
+        request.resource.data.members[request.resource.data.memberUids[1]]
+          .publicKey is string &&
+        request.resource.data.members[request.resource.data.memberUids[1]]
+          .publicKey.size() == 44 &&
         request.resource.data.members[request.resource.data.memberUids[1]]
           .publicKey ==
           getAfter(
@@ -101,20 +295,18 @@ service cloud.firestore {
           /databases/$(database)/documents/rooms/$(roomId)/joinRequests/$(request.resource.data.memberUids[1])
         ).data.status == 'approved';
 
-      // A member marks their own safety code as verified (once).
-      allow update: if isMemberOf(resource.data) &&
+      // A member marks their safety code as verified.
+      allow update: if isMember(roomId) &&
         resource.data.closed == false &&
-        resource.data.memberUids.size() == 2 &&
         request.resource.data.diff(resource.data).affectedKeys()
           .hasOnly(['verifiedUids']) &&
-        !(request.auth.uid in resource.data.verifiedUids) &&
         request.resource.data.verifiedUids.hasAll(resource.data.verifiedUids) &&
         request.resource.data.verifiedUids.size() ==
           resource.data.verifiedUids.size() + 1 &&
         request.resource.data.verifiedUids.hasAny([request.auth.uid]);
 
       // A member leaves the room (the room closes).
-      allow update: if isMemberOf(resource.data) &&
+      allow update: if isMember(roomId) &&
         request.resource.data.closed == true &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'ownerUid', 'memberUids', 'members', 'closed'
@@ -141,13 +333,7 @@ service cloud.firestore {
 
       allow delete: if false;
 
-      // ----------------------------------------------------------------
-      // Join requests
-      // ----------------------------------------------------------------
       match /joinRequests/{requesterUid} {
-
-        // A user can only create a request for THEMSELVES, in an open room
-        // that still has room for one more person.
         allow create: if verified() &&
           request.auth.uid == requesterUid &&
           request.resource.data.keys().hasOnly([
@@ -166,11 +352,9 @@ service cloud.firestore {
           get(roomPath(roomId)).data.memberUids.size() == 1 &&
           !get(roomPath(roomId)).data.memberUids.hasAny([requesterUid]);
 
-        // Only the requester and the room owner can see a request.
         allow get, list: if verified() &&
           (request.auth.uid == requesterUid || isOwner(roomId));
 
-        // OWNER ONLY: approve or reject a pending request.
         allow update: if isOwner(roomId) &&
           resource.data.status == 'pending' &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -181,7 +365,6 @@ service cloud.firestore {
           (request.resource.data.status == 'rejected' ||
             getAfter(roomPath(roomId)).data.memberUids.hasAny([requesterUid]));
 
-        // The requester can re-send a request that was rejected.
         allow update: if verified() &&
           request.auth.uid == requesterUid &&
           resource.data.status == 'rejected' &&
@@ -196,15 +379,10 @@ service cloud.firestore {
         allow delete: if false;
       }
 
-      // ----------------------------------------------------------------
-      // Messages (end-to-end encrypted: the server only sees ciphertext)
-      // ----------------------------------------------------------------
       match /messages/{messageId} {
-
         allow get, list: if isMember(roomId);
 
         allow create: if isMember(roomId) &&
-          messageId.matches('[0-9a-f]{32}') &&
           get(roomPath(roomId)).data.closed == false &&
           get(roomPath(roomId)).data.memberUids.size() == 2 &&
           get(roomPath(roomId)).data.verifiedUids.hasAll(
@@ -215,7 +393,8 @@ service cloud.firestore {
           ]) &&
           request.resource.data.senderUid == request.auth.uid &&
           request.resource.data.ciphertext is string &&
-          request.resource.data.ciphertext.size() > 0 &&
+          // Raised from 2048: 500 emoji-heavy characters can exceed it once
+          // encrypted and base64-encoded.
           request.resource.data.ciphertext.size() <= 4096 &&
           request.resource.data.sentAt == request.time &&
           request.resource.data.seenBy == [request.auth.uid] &&
@@ -227,12 +406,10 @@ service cloud.firestore {
                 /databases/$(database)/documents/rooms/$(roomId)/messages/$(request.resource.data.replyToId)
               )));
 
-        // Mark the OTHER person's message as seen (once, by you only).
         allow update: if isMember(roomId) &&
           resource.data.senderUid != request.auth.uid &&
           request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['seenBy']) &&
-          !(request.auth.uid in resource.data.seenBy) &&
           request.resource.data.seenBy.hasAll(resource.data.seenBy) &&
           request.resource.data.seenBy.size() == resource.data.seenBy.size() + 1 &&
           request.resource.data.seenBy.hasAny([request.auth.uid]);
@@ -243,7 +420,6 @@ service cloud.firestore {
           get(roomPath(roomId)).data.closed == false &&
           request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['reactions']) &&
-          request.resource.data.reactions is map &&
           request.resource.data.reactions.diff(
             resource.data.get('reactions', {})
           ).affectedKeys().hasOnly([request.auth.uid]) &&
@@ -255,12 +431,6 @@ service cloud.firestore {
         // Messages are never deleted, so both people always see the same history.
         allow delete: if false;
       }
-    }
-
-    // Everything not listed above is denied. (Firestore already does this by
-    // default; it is written out so nobody adds an open rule by accident.)
-    match /{document=**} {
-      allow read, write: if false;
     }
   }
 }

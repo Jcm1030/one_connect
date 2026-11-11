@@ -40,12 +40,17 @@ class OnlineRoom {
   final List<String> verifiedUids;
   final bool closed;
 
+  // True for a guest room (started from a talk request). Rooms saved before
+  // guest rooms existed have no "kind" field and are normal roommate rooms.
+  final bool guest;
+
   const OnlineRoom({
     required this.code,
     required this.ownerUid,
     required this.members,
     required this.verifiedUids,
     required this.closed,
+    this.guest = false,
   });
 
   String ownerAfterLeaving(String leavingUid) {
@@ -89,6 +94,7 @@ class OnlineRoom {
         (data['verifiedUids'] as List).cast<String>(),
       ),
       closed: data['closed'] as bool,
+      guest: data['kind'] == 'guest',
     );
   }
 }
@@ -118,6 +124,60 @@ class OnlineJoinRequest {
       requesterUid: data['requesterUid'] as String,
       displayName: data['displayName'] as String,
       publicKey: data['publicKey'] as String,
+    );
+  }
+}
+
+// A request to start a guest chat, found through a username search.
+// Stored at talkRequests/{fromUid}_{toUid}, so there is one per direction.
+class TalkRequest {
+  final String id;
+  final String fromUid;
+  final String toUid;
+  final String fromUsername;
+  final String toUsername;
+  final String fromName;
+  final String publicKey;
+  final String status; // pending, accepted or declined
+  final String? roomCode; // set once the request is accepted
+
+  const TalkRequest({
+    required this.id,
+    required this.fromUid,
+    required this.toUid,
+    required this.fromUsername,
+    required this.toUsername,
+    required this.fromName,
+    required this.publicKey,
+    required this.status,
+    this.roomCode,
+  });
+
+  factory TalkRequest.fromSnapshot(
+    DocumentSnapshot<Map<String, dynamic>> snapshot,
+  ) {
+    final data = snapshot.data();
+    if (data == null ||
+        data['fromUid'] is! String ||
+        data['toUid'] is! String ||
+        data['fromUsername'] is! String ||
+        data['toUsername'] is! String ||
+        data['fromName'] is! String ||
+        data['publicKey'] is! String ||
+        data['status'] is! String ||
+        (data['roomCode'] != null && data['roomCode'] is! String)) {
+      throw const FormatException('Invalid talk request.');
+    }
+    return TalkRequest(
+      id: snapshot.id,
+      fromUid: data['fromUid'] as String,
+      toUid: data['toUid'] as String,
+      fromUsername: data['fromUsername'] as String,
+      toUsername: data['toUsername'] as String,
+      fromName: data['fromName'] as String,
+      publicKey: data['publicKey'] as String,
+      status: data['status'] as String,
+      roomCode: data['roomCode'] as String?,
     );
   }
 }
@@ -222,6 +282,29 @@ abstract interface class OnlineChatService {
   });
 
   Future<void> markSeen({required String code, required String messageId});
+
+  // ---------- Guest chats ----------
+
+  Future<void> sendTalkRequest({
+    required String toUid,
+    required String toUsername,
+    required OnlineRoomMember sender,
+  });
+
+  // Accepting creates the guest room with both people in it.
+  Future<void> acceptTalkRequest({
+    required TalkRequest request,
+    required String roomCode,
+    required OnlineRoomMember me,
+  });
+
+  Future<void> declineTalkRequest(TalkRequest request);
+
+  // Pending requests other people sent to me.
+  Stream<List<TalkRequest>> watchIncomingTalkRequests();
+
+  // Pending requests I sent to other people.
+  Stream<List<TalkRequest>> watchOutgoingTalkRequests();
 }
 
 class FirestoreOnlineChatService implements OnlineChatService {
@@ -460,5 +543,170 @@ class FirestoreOnlineChatService implements OnlineChatService {
     await _room(code).collection('messages').doc(messageId).update({
       'seenBy': FieldValue.arrayUnion([uid]),
     });
+  }
+
+  // ---------- Guest chats ----------
+
+  CollectionReference<Map<String, dynamic>> get _talkRequests =>
+      _firestore.collection('talkRequests');
+
+  // True while the guest room is open. If we can no longer read it, we are
+  // not a member any more, which means we left and the room is closed.
+  Future<bool> _isRoomOpen(String code) async {
+    try {
+      final snapshot = await _room(code).get();
+      return snapshot.exists && snapshot.data()?['closed'] == false;
+    } on FirebaseException {
+      return false;
+    }
+  }
+
+  @override
+  Future<void> sendTalkRequest({
+    required String toUid,
+    required String toUsername,
+    required OnlineRoomMember sender,
+  }) async {
+    final uid = currentUid;
+    if (sender.uid != uid) {
+      throw StateError('A talk request must come from the signed-in account.');
+    }
+    if (toUid == uid) {
+      throw StateError('You cannot send a request to yourself.');
+    }
+
+    // The request carries your username, so you need one first.
+    final userSnapshot = await _firestore.collection('users').doc(uid).get();
+    final fromUsername = userSnapshot.data()?['username'];
+    if (fromUsername is! String) {
+      throw StateError(
+        'Choose a username first, in the Online account screen.',
+      );
+    }
+
+    // If they already asked you, you should accept theirs instead.
+    final reverse = await _talkRequests.doc('${toUid}_$uid').get();
+    if (reverse.exists && reverse.data()?['status'] == 'pending') {
+      throw StateError(
+        '@$toUsername already sent you a request. Accept it in the guest room.',
+      );
+    }
+
+    final requestRef = _talkRequests.doc('${uid}_$toUid');
+    final existing = await requestRef.get();
+    if (!existing.exists) {
+      await requestRef.set({
+        'fromUid': uid,
+        'toUid': toUid,
+        'fromUsername': fromUsername,
+        'toUsername': toUsername,
+        'fromName': sender.displayName,
+        'publicKey': sender.publicKey,
+        'status': 'pending',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+      return;
+    }
+
+    final data = existing.data() ?? const <String, dynamic>{};
+    final status = data['status'];
+    if (status == 'pending') {
+      throw StateError('You already sent a request to @$toUsername.');
+    }
+    if (status == 'declined') {
+      throw StateError('@$toUsername is not accepting requests from you.');
+    }
+
+    // The last request was accepted. Ask again only after that chat closed.
+    final oldCode = data['roomCode'];
+    if (oldCode is String && await _isRoomOpen(oldCode)) {
+      throw StateError('You already have a guest chat with @$toUsername.');
+    }
+    await requestRef.update({
+      'status': 'pending',
+      'fromName': sender.displayName,
+      'publicKey': sender.publicKey,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'roomCode': FieldValue.delete(),
+    });
+  }
+
+  @override
+  Future<void> acceptTalkRequest({
+    required TalkRequest request,
+    required String roomCode,
+    required OnlineRoomMember me,
+  }) async {
+    final uid = currentUid;
+    if (me.uid != uid || request.toUid != uid) {
+      throw StateError('This request is not addressed to you.');
+    }
+    // Throws a FormatException if the sender's key is not a valid key.
+    PersonKeys.publicKeyFromText(request.publicKey);
+
+    // One batch: the room and the accepted request are written together,
+    // and the security rules check that they match each other.
+    final batch = _firestore.batch();
+    batch.set(_room(roomCode), {
+      'kind': 'guest',
+      'ownerUid': uid,
+      'memberUids': [uid, request.fromUid],
+      'members': {
+        uid: me.toMap(),
+        request.fromUid: {
+          'displayName': request.fromName,
+          'publicKey': request.publicKey,
+        },
+      },
+      'verifiedUids': <String>[],
+      'closed': false,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+    batch.update(_talkRequests.doc(request.id), {
+      'status': 'accepted',
+      'roomCode': roomCode,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+  }
+
+  @override
+  Future<void> declineTalkRequest(TalkRequest request) async {
+    final uid = currentUid;
+    if (request.toUid != uid) {
+      throw StateError('This request is not addressed to you.');
+    }
+    await _talkRequests.doc(request.id).update({
+      'status': 'declined',
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  @override
+  Stream<List<TalkRequest>> watchIncomingTalkRequests() {
+    final uid = currentUid;
+    return _talkRequests
+        .where('toUid', isEqualTo: uid)
+        .where('status', isEqualTo: 'pending')
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map(TalkRequest.fromSnapshot)
+              .toList(growable: false),
+        );
+  }
+
+  @override
+  Stream<List<TalkRequest>> watchOutgoingTalkRequests() {
+    final uid = currentUid;
+    return _talkRequests
+        .where('fromUid', isEqualTo: uid)
+        .where('status', isEqualTo: 'pending')
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map(TalkRequest.fromSnapshot)
+              .toList(growable: false),
+        );
   }
 }

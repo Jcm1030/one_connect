@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
 import '../app_state.dart';
 import '../models/app_settings.dart';
 import '../widgets/screen_body.dart';
+import '../updates/update_dialog.dart';
 
-const _developerName = 'John Carlo Medina';
+const _developerName = 'J.C. Medina';
 const _developerContact = 'dark.803011@gmail.com';
 const _appVersion = '1.0.0';
 
@@ -111,7 +112,7 @@ class SettingsScreen extends StatelessWidget {
                 const SizedBox(height: 28),
                 Text('Developer', style: titleStyle),
                 const SizedBox(height: 8),
-                const Card(
+                Card(
                   child: Column(
                     children: [
                       ListTile(
@@ -124,11 +125,24 @@ class SettingsScreen extends StatelessWidget {
                         title: Text('Contact'),
                         subtitle: Text(_developerContact),
                       ),
-                      ListTile(
-                        leading: Icon(Icons.info),
-                        title: Text('Version'),
-                        subtitle: Text(_appVersion),
+                      FutureBuilder<String>(
+                        future: appState.updateService?.currentVersion(),
+                        builder: (context, snapshot) => ListTile(
+                          leading: const Icon(Icons.info),
+                          title: const Text('Version'),
+                          subtitle: Text(snapshot.data ?? _appVersion),
+                        ),
                       ),
+                      if (appState.updateService != null)
+                        ListTile(
+                          leading: const Icon(Icons.system_update),
+                          title: const Text('Check for updates'),
+                          onTap: () => checkForUpdateAndAsk(
+                            context,
+                            appState,
+                            manual: true,
+                          ),
+                        ),
                     ],
                   ),
                 ),

@@ -89,6 +89,31 @@ class _FakeOnlineChatService implements OnlineChatService {
   }) async {
     seenMessageIds.add(messageId);
   }
+
+  @override
+  Future<void> sendTalkRequest({
+    required String toUid,
+    required String toUsername,
+    required OnlineRoomMember sender,
+  }) async {}
+
+  @override
+  Future<void> acceptTalkRequest({
+    required TalkRequest request,
+    required String roomCode,
+    required OnlineRoomMember me,
+  }) async {}
+
+  @override
+  Future<void> declineTalkRequest(TalkRequest request) async {}
+
+  @override
+  Stream<List<TalkRequest>> watchIncomingTalkRequests() =>
+      Stream.value(const []);
+
+  @override
+  Stream<List<TalkRequest>> watchOutgoingTalkRequests() =>
+      Stream.value(const []);
 }
 
 class _StreamingFakeOnlineChatService extends _FakeOnlineChatService {

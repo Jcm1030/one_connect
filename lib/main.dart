@@ -14,6 +14,8 @@ import 'photos/photo_store.dart';
 import 'online/online_chat_service.dart';
 import 'storage/data_store.dart';
 import 'storage/save_location.dart';
+import 'updates/ota_update_service.dart';
+
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,6 +30,7 @@ Future<void> main() async {
     keyStore: SecureKeyStore(),
     onlineChatService: FirestoreOnlineChatService(),
     actionSoundEffects: AudioActionSoundEffects(),
+    updateService: OtaUpdateService(),
   );
   await appState.load();
 

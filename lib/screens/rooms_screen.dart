@@ -6,6 +6,7 @@ import '../app_state.dart';
 import '../formatting.dart';
 import '../models/chat_room.dart';
 import '../online/online_chat_service.dart';
+import '../online/username_service.dart';
 import '../widgets/animations.dart';
 import '../widgets/profile_avatar.dart';
 import '../widgets/screen_body.dart';
@@ -15,9 +16,12 @@ import 'chat_screen.dart';
 import 'edit_profile_dialog.dart';
 import 'join_room_dialog.dart';
 import 'settings_screen.dart';
+import 'username_screen_dialog.dart';
 
 // Shows the current user's rooms and lets them create a room, join a room,
 // edit their name, and leave a room.
+// A small "Guest room" section above the roommate rooms holds chats started
+// from a username search. It can be collapsed.
 // The back arrow in the top bar returns to the Profile screen.
 class RoomsScreen extends StatefulWidget {
   final AppState appState;
@@ -30,6 +34,13 @@ class RoomsScreen extends StatefulWidget {
 
 class _RoomsScreenState extends State<RoomsScreen> {
   final Map<String, Stream<List<OnlineJoinRequest>>> _joinRequestStreams = {};
+  final _usernameService = UsernameService();
+
+  // Is the guest section open or folded away?
+  bool _guestExpanded = true;
+
+  // Talk requests being accepted or declined right now (their buttons wait).
+  final Set<String> _busyRequests = {};
 
   Stream<List<OnlineJoinRequest>> _joinRequestsFor(ChatRoom room) =>
       _joinRequestStreams.putIfAbsent(
@@ -143,6 +154,105 @@ class _RoomsScreenState extends State<RoomsScreen> {
       }
     }
     await widget.appState.actionSoundEffects?.playSuccess();
+  }
+
+  // ---------- Guest chats ----------
+
+  // Search a username, then ask that person to talk.
+  Future<void> _findPerson() async {
+    final picked = await showDialog<UsernameResult>(
+      context: context,
+      builder: (_) => UsernameSearchDialog(service: _usernameService),
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Talk to @${picked.username}?'),
+        content: const Text(
+          'They will get a request. If they accept, you both join a guest '
+          'chat. You must compare safety codes before you can send messages.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Send request'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+
+    try {
+      await widget.appState.sendTalkRequest(
+        toUid: picked.uid,
+        toUsername: picked.username,
+      );
+      await widget.appState.actionSoundEffects?.playSuccess();
+      if (mounted) {
+        setState(() => _guestExpanded = true);
+        context.showAppMessage('Request sent to @${picked.username}.');
+      }
+    } on FirebaseException catch (error) {
+      if (mounted) {
+        context.showAppMessage(
+          'Could not send request: ${error.message ?? error.code}',
+        );
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        context.showAppMessage(error.message);
+      }
+    }
+  }
+
+  Future<void> _respondToTalkRequest(
+    TalkRequest request, {
+    required bool accept,
+  }) async {
+    if (!_busyRequests.add(request.id)) {
+      return;
+    }
+    setState(() {});
+    try {
+      await widget.appState.respondToTalkRequest(request, accept: accept);
+      await widget.appState.actionSoundEffects?.playSuccess();
+      if (mounted) {
+        context.showAppMessage(
+          accept
+              ? 'You are now connected with @${request.fromUsername}.'
+              : 'Request declined.',
+        );
+      }
+    } on FirebaseException catch (error) {
+      if (mounted) {
+        context.showAppMessage(
+          'Could not answer request: ${error.message ?? error.code}',
+        );
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        context.showAppMessage(error.message);
+      }
+    } on FormatException catch (error) {
+      if (mounted) {
+        context.showAppMessage('Could not verify the sender’s key: $error');
+      }
+    } finally {
+      _busyRequests.remove(request.id);
+      if (mounted) {
+        setState(() {});
+      }
+    }
   }
 
   Future<void> _decideJoinRequest(
@@ -417,6 +527,207 @@ class _RoomsScreenState extends State<RoomsScreen> {
     );
   }
 
+  // ---------- Guest section ----------
+
+  // The little number bubble used for unread messages and new requests.
+  Widget _countBadge(int count) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      constraints: const BoxConstraints(minWidth: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: colors.primary,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        '$count',
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: colors.onPrimary,
+          fontWeight: FontWeight.bold,
+          fontSize: 12,
+        ),
+      ),
+    );
+  }
+
+  // Someone asked to talk to me: accept or decline.
+  Widget _buildIncomingRequestTile(TalkRequest request) {
+    final busy = _busyRequests.contains(request.id);
+    return ListTile(
+      dense: true,
+      visualDensity: VisualDensity.compact,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+      leading: const CircleAvatar(
+        radius: 16,
+        child: Icon(Icons.person_add_alt_1, size: 16),
+      ),
+      title: Text('@${request.fromUsername}'),
+      subtitle: Text('${request.fromName} wants to talk'),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: 'Accept',
+            onPressed: busy
+                ? null
+                : () => _respondToTalkRequest(request, accept: true),
+            icon: const Icon(Icons.check),
+          ),
+          IconButton(
+            tooltip: 'Decline',
+            onPressed: busy
+                ? null
+                : () => _respondToTalkRequest(request, accept: false),
+            icon: const Icon(Icons.close),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // I asked someone to talk: waiting for their answer.
+  Widget _buildOutgoingRequestTile(TalkRequest request) {
+    return ListTile(
+      dense: true,
+      visualDensity: VisualDensity.compact,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+      leading: const CircleAvatar(
+        radius: 16,
+        child: Icon(Icons.hourglass_empty, size: 16),
+      ),
+      title: Text('@${request.toUsername}'),
+      subtitle: const Text('Waiting for them to accept'),
+    );
+  }
+
+  // A guest chat. Smaller than a roommate room tile.
+  Widget _buildGuestTile(ChatRoom room) {
+    final user = widget.appState.currentUser!;
+    final otherMember = room.otherMemberOf(user);
+    final unread = room.countUnread(user);
+
+    return Opacity(
+      opacity: room.closed ? 0.7 : 1,
+      child: ListTile(
+        dense: true,
+        visualDensity: VisualDensity.compact,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+        leading: ProfileAvatar(
+          appState: widget.appState,
+          profile: otherMember,
+          radius: 16,
+        ),
+        title: Text(
+          roomMemberLabel(room, user),
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontWeight: unread > 0 ? FontWeight.w800 : FontWeight.w600,
+          ),
+        ),
+        subtitle: room.closed ? const Text('Closed') : null,
+        onTap: () => _openChat(room),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (unread > 0) _countBadge(unread),
+            IconButton(
+              icon: const Icon(Icons.logout, size: 20),
+              tooltip: 'Leave guest chat',
+              onPressed: () => _leaveRoom(room),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // The "Guest room" card above the roommate rooms. Tap the header to fold
+  // it away; a badge on the header still shows new requests.
+  Widget _buildGuestSection(AppState appState) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final guestRooms = appState.myGuestRooms;
+    final incoming = appState.incomingTalkRequests;
+    final outgoing = appState.outgoingTalkRequests;
+    final isEmpty = guestRooms.isEmpty && incoming.isEmpty && outgoing.isEmpty;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      child: Card(
+        margin: EdgeInsets.zero,
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            InkWell(
+              onTap: () => setState(() => _guestExpanded = !_guestExpanded),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.people_outline, size: 20, color: colors.primary),
+                    const SizedBox(width: 10),
+                    Text('Guest room', style: theme.textTheme.titleSmall),
+                    if (guestRooms.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        '${guestRooms.length}',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ],
+                    if (incoming.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      _countBadge(incoming.length),
+                    ],
+                    const Spacer(),
+                    AnimatedRotation(
+                      turns: _guestExpanded ? 0.5 : 0,
+                      duration: animationDuration(context, 200),
+                      child: const Icon(Icons.expand_more),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            AnimatedSize(
+              duration: animationDuration(context, 200),
+              curve: Curves.easeOut,
+              alignment: Alignment.topCenter,
+              child: _guestExpanded
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const Divider(height: 1),
+                        if (isEmpty)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+                            child: Text(
+                              'No guest chats yet. Tap the search icon to '
+                              'find someone by username.',
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          ),
+                        for (final request in incoming)
+                          _buildIncomingRequestTile(request),
+                        for (final request in outgoing)
+                          _buildOutgoingRequestTile(request),
+                        for (final room in guestRooms) _buildGuestTile(room),
+                      ],
+                    )
+                  : const SizedBox(width: double.infinity),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---------- Roommate rooms ----------
+
   Widget _buildRoomTile(ChatRoom room) {
     final user = widget.appState.currentUser!;
     final otherMember = room.otherMemberOf(user);
@@ -489,7 +800,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (room.online && room.ownerUid == user.accountId)
+                  if (_isRoomOwner(room))
                     StreamBuilder<List<OnlineJoinRequest>>(
                       stream: _joinRequestsFor(room),
                       builder: (context, snapshot) => GlowPulse(
@@ -554,6 +865,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
         final appState = widget.appState;
         final myRooms = appState.myRooms;
         final theme = Theme.of(context);
+        final online = appState.onlineChatService != null;
 
         return Scaffold(
           appBar: AppBar(
@@ -603,7 +915,16 @@ class _RoomsScreenState extends State<RoomsScreen> {
                           style: theme.textTheme.titleMedium,
                         ),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 8),
+                      // Search for a username to start a guest chat.
+                      if (online) ...[
+                        IconButton.outlined(
+                          icon: const Icon(Icons.search),
+                          tooltip: 'Find a username',
+                          onPressed: _findPerson,
+                        ),
+                        const SizedBox(width: 8),
+                      ],
                       OutlinedButton.icon(
                         icon: const Icon(Icons.login),
                         label: const Text('Join room'),
@@ -612,6 +933,8 @@ class _RoomsScreenState extends State<RoomsScreen> {
                     ],
                   ),
                 ),
+                // The guest room sits above the roommate rooms.
+                if (online) _buildGuestSection(appState),
                 if (myRooms.isEmpty)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 48),

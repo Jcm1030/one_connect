@@ -15,6 +15,7 @@ import 'online/online_chat_service.dart';
 import 'photos/photo_service.dart';
 import 'photos/photo_store.dart';
 import 'storage/app_storage.dart';
+import 'updates/update_service.dart';
 
 // The possible outcomes of trying to join a room by its code.
 enum JoinOutcome {
@@ -38,6 +39,9 @@ enum LinkResult {
 // currently using the app.
 // Screens listen for changes, then call save() to write them to the file.
 class AppState extends ChangeNotifier {
+  final ActionSoundEffects? actionSoundEffects;
+  final UpdateService? updateService;
+
   final AppStorage store;
 
   // The online account system. It is optional for isolated tests and
@@ -52,13 +56,17 @@ class AppState extends ChangeNotifier {
   // Where the encryption keys are kept safely. Null when it is not set up.
   final KeyStore? keyStore;
   final OnlineChatService? onlineChatService;
-  final ActionSoundEffects? actionSoundEffects;
 
   final MessageCrypto _crypto = MessageCrypto();
   StreamSubscription<List<OnlineRoom>>? _onlineRoomsSubscription;
   final Map<String, StreamSubscription<List<EncryptedChatMessage>>>
   _onlineMessageSubscriptions = {};
   final Map<String, RoomKey> _roomKeys = {};
+  StreamSubscription<List<TalkRequest>>? _incomingTalkSubscription;
+  StreamSubscription<List<TalkRequest>>? _outgoingTalkSubscription;
+
+  List<TalkRequest> incomingTalkRequests = const [];
+  List<TalkRequest> outgoingTalkRequests = const [];
   String? onlineError;
   final List<Profile> profiles = [];
   final List<ChatRoom> rooms = [];
@@ -85,11 +93,14 @@ class AppState extends ChangeNotifier {
     this.keyStore,
     this.onlineChatService,
     this.actionSoundEffects,
+    this.updateService,
   });
 
   @override
   void dispose() {
     unawaited(_onlineRoomsSubscription?.cancel());
+    unawaited(_incomingTalkSubscription?.cancel());
+    unawaited(_outgoingTalkSubscription?.cancel());
     for (final subscription in _onlineMessageSubscriptions.values) {
       unawaited(subscription.cancel());
     }
@@ -368,6 +379,29 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       },
     );
+
+    await _incomingTalkSubscription?.cancel();
+    _incomingTalkSubscription = service.watchIncomingTalkRequests().listen(
+      (requests) {
+        incomingTalkRequests = requests;
+        notifyListeners();
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        onlineError = 'Talk requests could not be loaded: $error';
+        notifyListeners();
+      },
+    );
+    await _outgoingTalkSubscription?.cancel();
+    _outgoingTalkSubscription = service.watchOutgoingTalkRequests().listen(
+      (requests) {
+        outgoingTalkRequests = requests;
+        notifyListeners();
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        onlineError = 'Talk requests could not be loaded: $error';
+        notifyListeners();
+      },
+    );
   }
 
   Future<void> _replaceOnlineRooms(List<OnlineRoom> onlineRooms) async {
@@ -399,6 +433,7 @@ class AppState extends ChangeNotifier {
       room
         ..online = true
         ..ownerUid = onlineRoom.ownerUid
+        ..guest = onlineRoom.guest
         ..closed = onlineRoom.closed;
       room.members.clear();
       room.publicKeys.clear();
@@ -538,7 +573,9 @@ class AppState extends ChangeNotifier {
     final profile = currentUser;
     if (service == null ||
         profile == null ||
-        rooms.any((room) => room.online && room.hasMember(profile))) {
+        rooms.any(
+          (room) => room.online && !room.guest && room.hasMember(profile),
+        )) {
       return null;
     }
     final uid = service.currentUid;
@@ -583,7 +620,9 @@ class AppState extends ChangeNotifier {
     if (service == null || profile == null) {
       throw StateError('Online rooms are not available.');
     }
-    if (rooms.any((room) => room.online && room.hasMember(profile))) {
+    if (rooms.any(
+      (room) => room.online && !room.guest && room.hasMember(profile),
+    )) {
       throw StateError('Leave your current room before joining another.');
     }
     final uid = service.currentUid;
@@ -616,6 +655,83 @@ class AppState extends ChangeNotifier {
     requesterUid: requesterUid,
     approve: approve,
   );
+
+  Future<void> sendTalkRequest({
+    required String toUid,
+    required String toUsername,
+  }) async {
+    final service = onlineChatService;
+    final profile = currentUser;
+    if (service == null || profile == null) {
+      throw StateError('Online chat is not available.');
+    }
+    final uid = service.currentUid;
+    if (profile.accountId != uid) {
+      throw StateError('The selected profile is not linked to this account.');
+    }
+    if (toUid == uid) {
+      throw StateError('You cannot send a request to yourself.');
+    }
+    final alreadyChatting = rooms.any(
+      (room) =>
+          room.online &&
+          room.guest &&
+          !room.closed &&
+          room.members.any((member) => member.accountId == toUid),
+    );
+    if (alreadyChatting) {
+      throw StateError('You already have a guest chat with @$toUsername.');
+    }
+    final keys = await ensureKeys(profile);
+    if (keys == null) {
+      throw StateError('Could not access this account’s encryption keys.');
+    }
+    await service.sendTalkRequest(
+      toUid: toUid,
+      toUsername: toUsername,
+      sender: OnlineRoomMember(
+        uid: uid,
+        displayName: profile.name,
+        publicKey: keys.publicKeyText,
+      ),
+    );
+  }
+
+  Future<void> respondToTalkRequest(
+    TalkRequest request, {
+    required bool accept,
+  }) async {
+    final service = onlineChatService;
+    final profile = currentUser;
+    if (service == null || profile == null) {
+      throw StateError('Online chat is not available.');
+    }
+    if (!accept) {
+      await service.declineTalkRequest(request);
+      return;
+    }
+    final uid = service.currentUid;
+    if (profile.accountId != uid) {
+      throw StateError('The selected profile is not linked to this account.');
+    }
+    final keys = await ensureKeys(profile);
+    if (keys == null) {
+      throw StateError('Could not access this account’s encryption keys.');
+    }
+    var code = ChatRoom().code;
+    while (findRoom(code) != null) {
+      code = ChatRoom().code;
+    }
+    await service.acceptTalkRequest(
+      request: request,
+      roomCode: code,
+      me: OnlineRoomMember(
+        uid: uid,
+        displayName: profile.name,
+        publicKey: keys.publicKeyText,
+      ),
+    );
+  }
 
   Future<void> leaveOnlineRoom(ChatRoom room) async {
     // Stop listening first: once we leave, the rules no longer let us read
@@ -747,13 +863,21 @@ class AppState extends ChangeNotifier {
 
   // ---------- Rooms ----------
 
-  // The rooms the current user is a member of.
+  // The roommate rooms the current user is a member of.
   List<ChatRoom> get myRooms {
     final user = currentUser;
     if (user == null) {
       return [];
     }
-    return rooms.where((room) => room.hasMember(user)).toList();
+    return rooms.where((room) => !room.guest && room.hasMember(user)).toList();
+  }
+
+  List<ChatRoom> get myGuestRooms {
+    final user = currentUser;
+    if (user == null) {
+      return [];
+    }
+    return rooms.where((room) => room.guest && room.hasMember(user)).toList();
   }
 
   ChatRoom? findRoom(String code) {

@@ -7,6 +7,7 @@ import 'package:oneconnect/models/chat_room.dart';
 import 'package:oneconnect/models/message.dart';
 import 'package:oneconnect/models/profile.dart';
 import 'package:oneconnect/screens/chat_screen.dart';
+import 'package:oneconnect/theme.dart';
 import 'helpers/fake_store.dart';
 
 void main() {
@@ -209,6 +210,39 @@ void main() {
 
     final field = tester.widget<TextField>(find.byType(TextField));
     expect(field.contextMenuBuilder, isNotNull);
+  });
+
+  testWidgets('the message box and composer use dark theme colors', (
+    tester,
+  ) async {
+    final darkTheme = buildTheme(ProfileColor.purple, Brightness.dark);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: darkTheme,
+        darkTheme: darkTheme,
+        themeMode: ThemeMode.dark,
+        home: ChatScreen(appState: appState, room: room),
+      ),
+    );
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(
+      field.decoration!.fillColor,
+      darkTheme.colorScheme.surfaceContainerHighest,
+    );
+    expect(
+      find.ancestor(
+        of: find.byType(TextField),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is Container &&
+              widget.decoration is BoxDecoration &&
+              (widget.decoration as BoxDecoration).color ==
+                  darkTheme.colorScheme.surface,
+        ),
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('message text cannot be selected, so it cannot be copied', (
