@@ -25,9 +25,15 @@ class OneConnectApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final initialScreen = appState.accountService?.currentUser == null
+    final accountId = appState.accountService?.currentUser?.id;
+    final linkedProfile = accountId == null
+        ? null
+        : appState.profiles
+              .where((profile) => profile.accountId == accountId)
+              .firstOrNull;
+    final initialScreen = accountId == null
         ? SignInScreen(appState: appState)
-        : ProfileScreen(appState: appState);
+        : ProfileScreen(appState: appState, profileToContinue: linkedProfile);
 
     return ListenableBuilder(
       listenable: appState,

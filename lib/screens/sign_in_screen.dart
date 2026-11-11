@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../accounts/account_service.dart';
 import '../app_state.dart';
+import '../models/profile.dart';
 import '../ui_feedback.dart';
 import '../validation.dart';
 import '../widgets/animations.dart';
@@ -65,10 +66,17 @@ class _SignInScreenState extends State<SignInScreen> {
 
   // Moves on to the profile screen, which asks for a profile if there is
   // none, then verifies the email and links the account.
-  void _openProfileScreen({bool autoContinue = false}) {
+  void _openProfileScreen({
+    bool autoContinue = false,
+    Profile? profileToContinue,
+  }) {
     Navigator.of(context).pushReplacement(
       smoothRoute<void>(
-        ProfileScreen(appState: widget.appState, autoContinue: autoContinue),
+        ProfileScreen(
+          appState: widget.appState,
+          autoContinue: autoContinue,
+          profileToContinue: profileToContinue,
+        ),
       ),
     );
   }
@@ -82,28 +90,32 @@ class _SignInScreenState extends State<SignInScreen> {
     if (!_formKey.currentState!.validate()) {
       return;
     }
-    var signedIn = false;
+    String? signedInAccountId;
     await _run(() async {
       final email = _emailController.text;
       final password = _passwordController.text;
       if (_creatingAccount) {
-        await service.signUp(email, password);
+        final user = await service.signUp(email, password);
+        signedInAccountId = user.id;
         try {
           await service.sendVerificationEmail();
         } on AccountException {
           // The account exists. "Resend email" on the next step can try again.
         }
       } else {
-        await service.signIn(email, password);
+        final user = await service.signIn(email, password);
+        signedInAccountId = user.id;
       }
-      signedIn = true;
     });
-    if (!signedIn || !mounted) {
+    if (signedInAccountId == null || !mounted) {
       return;
     }
     _passwordController.clear();
     _confirmController.clear();
-    _openProfileScreen();
+    final matchingProfile = widget.appState.profiles
+        .where((profile) => profile.accountId == signedInAccountId)
+        .firstOrNull;
+    _openProfileScreen(profileToContinue: matchingProfile);
   }
 
   Future<void> _forgotPassword() async {

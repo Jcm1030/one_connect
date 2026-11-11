@@ -34,7 +34,7 @@ class RoomsScreen extends StatefulWidget {
 
 class _RoomsScreenState extends State<RoomsScreen> {
   final Map<String, Stream<List<OnlineJoinRequest>>> _joinRequestStreams = {};
-  final _usernameService = UsernameService();
+  late final _usernameService = UsernameService();
 
   // Is the guest section open or folded away?
   bool _guestExpanded = true;

@@ -108,6 +108,25 @@ class AppState extends ChangeNotifier {
     super.dispose();
   }
 
+  Future<void> stopOnlineSync() async {
+    await _onlineRoomsSubscription?.cancel();
+    _onlineRoomsSubscription = null;
+    await _incomingTalkSubscription?.cancel();
+    _incomingTalkSubscription = null;
+    await _outgoingTalkSubscription?.cancel();
+    _outgoingTalkSubscription = null;
+    for (final subscription in _onlineMessageSubscriptions.values) {
+      await subscription.cancel();
+    }
+    _onlineMessageSubscriptions.clear();
+    _roomKeys.clear();
+    rooms.removeWhere((room) => room.online);
+    incomingTalkRequests = const [];
+    outgoingTalkRequests = const [];
+    onlineError = null;
+    currentUser = null;
+  }
+
   // True if this profile is linked to the signed-in, email-verified account.
   bool hasVerifiedAccount(Profile profile) {
     final user = accountService?.currentUser;

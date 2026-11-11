@@ -9,7 +9,9 @@ import '../models/profile.dart';
 import '../online/username_service.dart';
 import '../ui_feedback.dart';
 import '../validation.dart';
+import '../widgets/animations.dart';
 import '../widgets/screen_body.dart';
+import 'sign_in_screen.dart';
 
 // The optional online account. It shows one of three views:
 //   1. Not signed in: sign in, or create a new account.
@@ -41,7 +43,7 @@ class _AccountScreenState extends State<AccountScreen> {
   bool _keysReady = false; // are this profile's keys stored on this phone?
 
   // Username state.
-  final _usernameService = UsernameService();
+  late final _usernameService = UsernameService();
   Timer? _usernameDebounce;
   bool _usernameLoaded = false;
   String? _currentUsername; // the name saved online, or null if none yet
@@ -102,7 +104,27 @@ class _AccountScreenState extends State<AccountScreen> {
   Future<void> _loadUsername() async {
     _usernameLoaded = true;
     try {
-      final current = await _usernameService.currentUsername();
+      var current = await _usernameService.currentUsername();
+      var claimedNow = false;
+      String? problem;
+
+      // No online username yet: claim the one chosen at sign-up, so people
+      // are never asked for a username twice. Only if that name cannot be
+      // used online (taken by someone else, or reserved) is the person asked.
+      if (current == null) {
+        final preferred = _profile.username.trim().toLowerCase();
+        if (UsernameService.validate(preferred) != null) {
+          problem = '@$preferred cannot be used online. Pick another one.';
+        } else {
+          try {
+            current = await _usernameService.setUsername(preferred);
+            claimedNow = true;
+          } on StateError {
+            problem = '@$preferred is already taken online. Pick another one.';
+          }
+        }
+      }
+
       final text =
           current ?? await _usernameService.suggestUsername(_profile.name);
       if (!mounted) {
@@ -113,9 +135,12 @@ class _AccountScreenState extends State<AccountScreen> {
         _usernameController.text = text;
         _usernameError = null;
         _usernameHint = current == null
-            ? 'Suggested for you. You can change it.'
+            ? (problem ?? 'Suggested for you. You can change it.')
             : null;
       });
+      if (claimedNow) {
+        context.showAppMessage('People can now find you as @$current.');
+      }
     } on FirebaseException {
       _usernameLoaded = false; // lets it try again next time
       if (mounted) {
@@ -307,7 +332,15 @@ class _AccountScreenState extends State<AccountScreen> {
       await _service.signOut();
       _user = null;
       _resetUsername();
+      await widget.appState.stopOnlineSync();
     });
+    if (!mounted || _service.currentUser != null) {
+      return;
+    }
+    Navigator.of(context).pushAndRemoveUntil<void>(
+      smoothRoute<void>(SignInScreen(appState: widget.appState)),
+      (_) => false,
+    );
   }
 
   Future<void> _link() async {
@@ -654,6 +687,7 @@ class _AccountScreenState extends State<AccountScreen> {
   @override
   Widget build(BuildContext context) {
     final user = _user;
+    final profile = widget.profile ?? widget.appState.currentUser;
     final Widget view;
     if (user == null) {
       view = _buildSignedOut(context);
@@ -669,7 +703,7 @@ class _AccountScreenState extends State<AccountScreen> {
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            if (_profile.accountId != null) ...[
+            if (profile?.accountId != null) ...[
               _buildLinkedNotice(context),
               const SizedBox(height: 12),
             ],

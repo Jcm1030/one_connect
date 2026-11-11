@@ -1,8 +1,7 @@
 name: oneconnect
-description: A private one-to-one messaging app for roommates, friends, and others.
+description: A private one-to-one messaging app for partners, friends, and others.
 publish_to: 'none'
 version: 1.0.0+1
-
 environment:
   sdk: ^3.10.0
 

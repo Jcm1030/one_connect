@@ -4,6 +4,8 @@ import 'package:oneconnect/accounts/account_service.dart';
 import 'package:oneconnect/app_state.dart';
 import 'package:oneconnect/models/profile.dart';
 import 'package:oneconnect/screens/account_screen.dart';
+import 'package:oneconnect/screens/rooms_screen.dart';
+import 'package:oneconnect/screens/sign_in_screen.dart';
 
 import 'helpers/fake_account_service.dart';
 import 'helpers/memory_key_store.dart';
@@ -39,6 +41,31 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Sign in'), findsOneWidget);
     expect(find.text('Forgot password?'), findsOneWidget);
     expect(find.byType(TextFormField), findsNWidgets(2)); // email, password
+  });
+
+  testWidgets('sign out returns to sign in and resumes the matching profile', (
+    tester,
+  ) async {
+    useTallScreen(tester);
+    final user = await service.signUp('ana@example.com', 'a long password');
+    ana.accountId = user.id;
+    await tester.pumpWidget(screen());
+
+    await tester.tap(find.text('Sign out'));
+    await tester.pumpAndSettle();
+    expect(service.currentUser, isNull);
+    expect(appState.currentUser, isNull);
+    expect(find.byType(SignInScreen), findsOneWidget);
+
+    service.markEmailVerified('ana@example.com');
+    final fields = find.byType(TextFormField);
+    await tester.enterText(fields.at(0), 'ana@example.com');
+    await tester.enterText(fields.at(1), 'a long password');
+    await tester.tap(find.widgetWithText(FilledButton, 'Sign In'));
+    await tester.pumpAndSettle();
+
+    expect(appState.currentUser, same(ana));
+    expect(find.byType(RoomsScreen), findsOneWidget);
   });
 
   testWidgets('creating an account sends the verification email and asks the '

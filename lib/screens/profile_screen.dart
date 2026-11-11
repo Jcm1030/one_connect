@@ -24,11 +24,13 @@ import 'settings_screen.dart';
 class ProfileScreen extends StatefulWidget {
   final AppState appState;
   final bool autoContinue;
+  final Profile? profileToContinue;
 
   const ProfileScreen({
     super.key,
     required this.appState,
     this.autoContinue = false,
+    this.profileToContinue,
   });
 
   @override
@@ -47,11 +49,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
   void initState() {
     super.initState();
     final profiles = widget.appState.profiles;
-    if (widget.autoContinue && profiles.length == 1) {
-      // Skip the "Continue" button when the person chose "Continue as you".
+    final profileToContinue =
+        widget.profileToContinue ??
+        (widget.autoContinue && profiles.length == 1 ? profiles.single : null);
+    if (profileToContinue != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          _continueWithProfile(profiles.single);
+          _continueWithProfile(profileToContinue);
         }
       });
     }
