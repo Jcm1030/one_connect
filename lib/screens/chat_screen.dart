@@ -49,6 +49,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   // True while messages are being marked as seen, so two runs never overlap.
   bool _markingSeen = false;
+  bool _roomWasClosed = false;
+  bool _guestLeaveNoticeShown = false;
   int _scrollRequest = 0;
 
   static const _reactionEmojis = ['👍', '❤️', '😄', '😮', '😢', '🤝'];
@@ -60,6 +62,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _focusNode.addListener(_onInputFocusChanged);
     _initialMessageCount = widget.room.messages.length;
     _lastObservedMessageCount = _initialMessageCount;
+    _roomWasClosed = widget.room.closed;
     final me = widget.appState.currentUser!;
     final fresh = widget.room.messages
         .where((message) => message.sender != me && !message.seen)
@@ -67,6 +70,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _newMessageIds = {for (final message in fresh) message.id};
     _firstNewMessageId = fresh.isEmpty ? null : fresh.first.id;
     widget.appState.addListener(_onAppStateChanged);
+    if (_roomWasClosed) {
+      _showGuestLeaveNotice();
+    }
     _markSeen();
     _scrollToBottom(animate: false);
   }
@@ -107,9 +113,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     _lastObservedMessageCount = messageCount;
 
-    // The other person left: a reply can no longer be sent, so drop it.
-    if (widget.room.closed && _replyingTo != null) {
-      setState(() => _replyingTo = null);
+    if (_roomWasClosed != widget.room.closed) {
+      _roomWasClosed = widget.room.closed;
+      setState(() {
+        if (_roomWasClosed) {
+          _replyingTo = null;
+        }
+      });
+      if (_roomWasClosed) {
+        _showGuestLeaveNotice();
+      }
     }
     final me = widget.appState.currentUser;
     if (me == null) {
@@ -121,6 +134,34 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (hasUnread) {
       _markSeen();
     }
+  }
+
+  void _showGuestLeaveNotice() {
+    if (_guestLeaveNoticeShown || !widget.room.online || !widget.room.guest) {
+      return;
+    }
+    _guestLeaveNoticeShown = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Guest room closed'),
+          content: const Text(
+            'The other person has left the guest room. You can still read '
+            'the existing messages, but no one can send new ones.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    });
   }
 
   // Opening the chat means you have now seen the other person's messages.
@@ -1015,6 +1056,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   ),
                   Text(
                     otherMember == null
+                        ? 'Room ${widget.room.code}'
+                        : otherMember.username.startsWith('online_')
                         ? 'Room ${widget.room.code}'
                         : '@${otherMember.username}',
                     style: TextStyle(fontSize: 12, color: subtitleColor),

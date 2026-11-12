@@ -26,9 +26,10 @@ icon across the supported platforms.
 - **New-message highlights:** a room with unread messages glows softly in the
   list, and messages that were waiting when you open a chat glow briefly under
   a \"New messages\" line.
-- **Closed rooms:** when one of the two people leaves, the room stops accepting
-  new members, so nobody can join later and read the conversation. If the
-  creator leaves, the remaining roommate becomes the room owner.
+- **Leaving rooms:** when a non-owner leaves, the room closes to new members
+  and the remaining person keeps the chat history. If the owner leaves, they
+  must confirm permanent deletion of the room, messages, and pending join
+  requests for everyone.
 - **Settings:** light / dark / follow-the-phone theme, three text sizes, and a
   "Reduce animations" switch.
 - **Friendly animations:** smooth screen changes, lists that appear row by row,

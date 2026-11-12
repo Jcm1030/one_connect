@@ -90,32 +90,28 @@ class _SignInScreenState extends State<SignInScreen> {
     if (!_formKey.currentState!.validate()) {
       return;
     }
-    String? signedInAccountId;
+    var signedIn = false;
     await _run(() async {
       final email = _emailController.text;
       final password = _passwordController.text;
       if (_creatingAccount) {
-        final user = await service.signUp(email, password);
-        signedInAccountId = user.id;
+        await service.signUp(email, password);
         try {
           await service.sendVerificationEmail();
         } on AccountException {
           // The account exists. "Resend email" on the next step can try again.
         }
       } else {
-        final user = await service.signIn(email, password);
-        signedInAccountId = user.id;
+        await service.signIn(email, password);
       }
+      signedIn = true;
     });
-    if (signedInAccountId == null || !mounted) {
+    if (!signedIn || !mounted) {
       return;
     }
     _passwordController.clear();
     _confirmController.clear();
-    final matchingProfile = widget.appState.profiles
-        .where((profile) => profile.accountId == signedInAccountId)
-        .firstOrNull;
-    _openProfileScreen(profileToContinue: matchingProfile);
+    _openProfileScreen();
   }
 
   Future<void> _forgotPassword() async {

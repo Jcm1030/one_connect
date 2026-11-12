@@ -61,6 +61,7 @@ class AppState extends ChangeNotifier {
   StreamSubscription<List<OnlineRoom>>? _onlineRoomsSubscription;
   final Map<String, StreamSubscription<List<EncryptedChatMessage>>>
   _onlineMessageSubscriptions = {};
+  final Map<String, String> _onlineUsernames = {};
   final Map<String, RoomKey> _roomKeys = {};
   StreamSubscription<List<TalkRequest>>? _incomingTalkSubscription;
   StreamSubscription<List<TalkRequest>>? _outgoingTalkSubscription;
@@ -462,18 +463,33 @@ class AppState extends ChangeNotifier {
       for (final entry in onlineRoom.members.entries) {
         final uid = entry.key;
         final member = entry.value;
-        final profile = uid == currentUser?.accountId
-            ? currentUser!
-            : profileByUid.putIfAbsent(
-                uid,
-                () =>
-                    previousMembers[uid] ??
-                    Profile(
-                      name: member.displayName,
-                      username: 'online_$uid',
-                      accountId: uid,
-                    ),
-              );
+        final Profile profile;
+        if (uid == currentUser?.accountId) {
+          profile = currentUser!;
+        } else if (profileByUid.containsKey(uid)) {
+          profile = profileByUid[uid]!;
+        } else {
+          var username = member.username;
+          if (username.isEmpty) {
+            username = _onlineUsernames[uid] ?? '';
+            if (username.isEmpty) {
+              username =
+                  await onlineChatService!.lookupUsername(uid) ?? 'online_$uid';
+              if (!username.startsWith('online_')) {
+                _onlineUsernames[uid] = username;
+              }
+            }
+          }
+          final previous = previousMembers[uid];
+          profile = previous?.username == username
+              ? previous!
+              : Profile(
+                  name: member.displayName,
+                  username: username,
+                  accountId: uid,
+                );
+          profileByUid[uid] = profile;
+        }
         room.members.add(profile);
         room.publicKeys[uid] = member.publicKey;
       }
@@ -615,6 +631,7 @@ class AppState extends ChangeNotifier {
         uid: uid,
         displayName: profile.name,
         publicKey: keys.publicKeyText,
+        username: profile.username,
       ),
     );
     final synchronizedRoom = rooms
@@ -658,6 +675,7 @@ class AppState extends ChangeNotifier {
         uid: uid,
         displayName: profile.name,
         publicKey: keys.publicKeyText,
+        username: profile.username,
       ),
     );
   }
@@ -712,6 +730,7 @@ class AppState extends ChangeNotifier {
         uid: uid,
         displayName: profile.name,
         publicKey: keys.publicKeyText,
+        username: profile.username,
       ),
     );
   }
@@ -748,6 +767,7 @@ class AppState extends ChangeNotifier {
         uid: uid,
         displayName: profile.name,
         publicKey: keys.publicKeyText,
+        username: profile.username,
       ),
     );
   }

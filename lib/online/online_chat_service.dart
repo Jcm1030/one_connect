@@ -6,18 +6,24 @@ import '../crypto/message_crypto.dart';
 class OnlineRoomMember {
   final String uid;
   final String displayName;
+  final String username;
   final String publicKey;
 
   const OnlineRoomMember({
     required this.uid,
     required this.displayName,
     required this.publicKey,
+    this.username = '',
   });
 
-  Map<String, Object> toMap() => {
-    'displayName': displayName,
-    'publicKey': publicKey,
-  };
+  Map<String, Object> toMap() {
+    final normalizedUsername = username.trim().toLowerCase();
+    return {
+      'displayName': displayName,
+      'publicKey': publicKey,
+      if (normalizedUsername.isNotEmpty) 'username': normalizedUsername,
+    };
+  }
 
   factory OnlineRoomMember.fromMap(String uid, Object? value) {
     if (value is! Map ||
@@ -29,6 +35,7 @@ class OnlineRoomMember {
       uid: uid,
       displayName: value['displayName'] as String,
       publicKey: value['publicKey'] as String,
+      username: value['username'] is String ? value['username'] as String : '',
     );
   }
 }
@@ -102,12 +109,14 @@ class OnlineRoom {
 class OnlineJoinRequest {
   final String requesterUid;
   final String displayName;
+  final String username;
   final String publicKey;
 
   const OnlineJoinRequest({
     required this.requesterUid,
     required this.displayName,
     required this.publicKey,
+    this.username = '',
   });
 
   factory OnlineJoinRequest.fromSnapshot(
@@ -124,6 +133,7 @@ class OnlineJoinRequest {
       requesterUid: data['requesterUid'] as String,
       displayName: data['displayName'] as String,
       publicKey: data['publicKey'] as String,
+      username: data['username'] is String ? data['username'] as String : '',
     );
   }
 }
@@ -300,6 +310,8 @@ abstract interface class OnlineChatService {
 
   Future<void> declineTalkRequest(TalkRequest request);
 
+  Future<String?> lookupUsername(String uid);
+
   // Pending requests other people sent to me.
   Stream<List<TalkRequest>> watchIncomingTalkRequests();
 
@@ -358,6 +370,7 @@ class FirestoreOnlineChatService implements OnlineChatService {
     if (requester.uid != uid) {
       throw StateError('A join request must belong to the signed-in account.');
     }
+    final username = requester.username.trim().toLowerCase();
     final requestRef = _room(code).collection('joinRequests').doc(uid);
     await _firestore.runTransaction((transaction) async {
       final existing = await transaction.get(requestRef);
@@ -368,12 +381,14 @@ class FirestoreOnlineChatService implements OnlineChatService {
         transaction.update(requestRef, {
           'status': 'pending',
           'updatedAt': FieldValue.serverTimestamp(),
+          if (username.isNotEmpty) 'username': username,
         });
         return;
       }
       transaction.set(requestRef, {
         'requesterUid': uid,
         'displayName': requester.displayName,
+        if (username.isNotEmpty) 'username': username,
         'publicKey': requester.publicKey,
         'status': 'pending',
         'createdAt': FieldValue.serverTimestamp(),
@@ -418,6 +433,8 @@ class FirestoreOnlineChatService implements OnlineChatService {
             request.requesterUid: {
               'displayName': request.displayName,
               'publicKey': request.publicKey,
+              if (request.username.trim().isNotEmpty)
+                'username': request.username.trim().toLowerCase(),
             },
           },
         });
@@ -432,6 +449,7 @@ class FirestoreOnlineChatService implements OnlineChatService {
   @override
   Future<void> leaveRoom(String code) async {
     final uid = currentUid;
+    var deleteRoom = false;
     await _firestore.runTransaction((transaction) async {
       final roomRef = _room(code);
       final snapshot = await transaction.get(roomRef);
@@ -442,6 +460,33 @@ class FirestoreOnlineChatService implements OnlineChatService {
       if (!room.members.containsKey(uid)) {
         return;
       }
+      if (snapshot.data()?['deleting'] == true) {
+        if (room.ownerUid != uid) {
+          throw StateError('The room is being deleted by its owner.');
+        }
+        deleteRoom = true;
+        return;
+      }
+      if (room.guest && room.members.length > 1) {
+        final remaining = Map<String, OnlineRoomMember>.of(room.members)
+          ..remove(uid);
+        transaction.update(roomRef, {
+          'ownerUid': room.ownerAfterLeaving(uid),
+          'memberUids': remaining.keys.toList(),
+          'members': {
+            for (final entry in remaining.entries)
+              entry.key: entry.value.toMap(),
+          },
+          'closed': true,
+        });
+        return;
+      }
+      if (room.ownerUid == uid) {
+        transaction.update(roomRef, {'closed': true, 'deleting': true});
+        deleteRoom = true;
+        return;
+      }
+
       final remaining = Map<String, OnlineRoomMember>.of(room.members)
         ..remove(uid);
       transaction.update(roomRef, {
@@ -453,6 +498,29 @@ class FirestoreOnlineChatService implements OnlineChatService {
         'closed': true,
       });
     });
+
+    if (!deleteRoom) {
+      return;
+    }
+
+    await _deleteRoomSubcollection(code, 'messages');
+    await _deleteRoomSubcollection(code, 'joinRequests');
+    await _room(code).delete();
+  }
+
+  Future<void> _deleteRoomSubcollection(String code, String name) async {
+    final collection = _room(code).collection(name);
+    while (true) {
+      final snapshot = await collection.limit(400).get();
+      if (snapshot.docs.isEmpty) {
+        return;
+      }
+      final batch = _firestore.batch();
+      for (final document in snapshot.docs) {
+        batch.delete(document.reference);
+      }
+      await batch.commit();
+    }
   }
 
   @override
@@ -655,6 +723,7 @@ class FirestoreOnlineChatService implements OnlineChatService {
         uid: me.toMap(),
         request.fromUid: {
           'displayName': request.fromName,
+          'username': request.fromUsername,
           'publicKey': request.publicKey,
         },
       },
@@ -680,6 +749,16 @@ class FirestoreOnlineChatService implements OnlineChatService {
       'status': 'declined',
       'updatedAt': FieldValue.serverTimestamp(),
     });
+  }
+
+  @override
+  Future<String?> lookupUsername(String uid) async {
+    final snapshot = await _firestore
+        .collection('usernames')
+        .where('uid', isEqualTo: uid)
+        .limit(1)
+        .get();
+    return snapshot.docs.isEmpty ? null : snapshot.docs.first.id;
   }
 
   @override

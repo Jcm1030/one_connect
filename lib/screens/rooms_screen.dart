@@ -44,7 +44,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
 
   Stream<List<OnlineJoinRequest>> _joinRequestsFor(ChatRoom room) =>
       _joinRequestStreams.putIfAbsent(
-        room.code,
+        '${widget.appState.currentUser?.accountId}:${room.code}',
         () => widget.appState.watchJoinRequests(room.code),
       );
 
@@ -255,41 +255,28 @@ class _RoomsScreenState extends State<RoomsScreen> {
     }
   }
 
-  Future<void> _decideJoinRequest(
+  Future<String?> _decideJoinRequest(
     ChatRoom room,
     OnlineJoinRequest request, {
     required bool approve,
   }) async {
+    if (!_isRoomOwner(room)) {
+      return 'Only the room owner can decide join requests.';
+    }
     try {
-      if (!_isRoomOwner(room)) {
-        context.showAppMessage('Only the room owner can decide join requests.');
-        return;
-      }
       await widget.appState.decideJoinRequest(
         room.code,
         request.requesterUid,
         approve: approve,
       );
       await widget.appState.actionSoundEffects?.playSuccess();
-      if (mounted) {
-        context.showAppMessage(
-          approve ? 'Join request approved.' : 'Join request declined.',
-        );
-      }
+      return null;
     } on FirebaseException catch (error) {
-      if (mounted) {
-        context.showAppMessage(
-          'Could not update join request: ${error.message ?? error.code}',
-        );
-      }
+      return 'Could not update join request: ${error.message ?? error.code}';
     } on StateError catch (error) {
-      if (mounted) {
-        context.showAppMessage(error.message);
-      }
+      return error.message;
     } on FormatException catch (error) {
-      if (mounted) {
-        context.showAppMessage('Could not verify the joiner’s key: $error');
-      }
+      return 'Could not verify the joiner’s key: $error';
     }
   }
 
@@ -308,68 +295,164 @@ class _RoomsScreenState extends State<RoomsScreen> {
       return;
     }
 
+    String? busyRequesterUid;
+    String? actionError;
+    String? actionMessage;
+    final requestStream = widget.appState.watchJoinRequests(room.code);
+
     await showDialog<void>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text('Join requests for ${room.code}'),
-        content: SizedBox(
-          width: 360,
-          height: 280,
-          child: StreamBuilder<List<OnlineJoinRequest>>(
-            stream: _joinRequestsFor(room),
-            builder: (context, snapshot) {
-              if (snapshot.hasError) {
-                return Text('Could not load requests: ${snapshot.error}');
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          Future<void> decide(
+            OnlineJoinRequest request, {
+            required bool approve,
+          }) async {
+            setDialogState(() {
+              busyRequesterUid = request.requesterUid;
+              actionError = null;
+              actionMessage = null;
+            });
+            try {
+              final error = await _decideJoinRequest(
+                room,
+                request,
+                approve: approve,
+              );
+              if (dialogContext.mounted) {
+                setDialogState(() {
+                  actionError = error;
+                  actionMessage = error == null
+                      ? (approve
+                            ? 'Join request approved.'
+                            : 'Join request declined.')
+                      : null;
+                });
               }
-              if (!snapshot.hasData) {
-                return const Center(child: CircularProgressIndicator());
+            } finally {
+              if (dialogContext.mounted) {
+                setDialogState(() => busyRequesterUid = null);
               }
-              final requests = snapshot.data!;
-              if (requests.isEmpty) {
-                return const Center(child: Text('No pending requests.'));
-              }
-              return ListView(
+            }
+          }
+
+          return AlertDialog(
+            title: Text('Join requests for ${room.code}'),
+            content: SizedBox(
+              width: 360,
+              height: 280,
+              child: Column(
                 children: [
-                  for (final request in requests)
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(request.displayName),
-                      subtitle: const Text('Wants to join this room'),
-                      trailing: Wrap(
-                        spacing: 4,
-                        children: [
-                          IconButton(
-                            tooltip: 'Approve',
-                            onPressed: () => _decideJoinRequest(
-                              room,
-                              request,
-                              approve: true,
-                            ),
-                            icon: const Icon(Icons.check),
-                          ),
-                          IconButton(
-                            tooltip: 'Decline',
-                            onPressed: () => _decideJoinRequest(
-                              room,
-                              request,
-                              approve: false,
-                            ),
-                            icon: const Icon(Icons.close),
-                          ),
-                        ],
+                  if (actionError != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        actionError!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
                       ),
                     ),
+                  if (actionMessage != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        actionMessage!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                      ),
+                    ),
+                  Expanded(
+                    child: StreamBuilder<List<OnlineJoinRequest>>(
+                      stream: requestStream,
+                      builder: (context, snapshot) {
+                        if (snapshot.hasError) {
+                          return Text(
+                            'Could not load requests: ${snapshot.error}',
+                          );
+                        }
+                        if (!snapshot.hasData) {
+                          return const Center(
+                            child: CircularProgressIndicator(),
+                          );
+                        }
+                        final requests = snapshot.data!;
+                        if (requests.isEmpty) {
+                          return const Center(
+                            child: Text('No pending requests.'),
+                          );
+                        }
+                        return ListView(
+                          children: [
+                            for (final request in requests)
+                              ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                title: Text(request.displayName),
+                                subtitle: Text(
+                                  request.username.isEmpty
+                                      ? 'Wants to join this room'
+                                      : '@${request.username} wants to join',
+                                ),
+                                trailing:
+                                    busyRequesterUid == request.requesterUid
+                                    ? const SizedBox(
+                                        width: 48,
+                                        height: 48,
+                                        child: Center(
+                                          child: SizedBox(
+                                            width: 22,
+                                            height: 22,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    : Wrap(
+                                        spacing: 4,
+                                        children: [
+                                          IconButton(
+                                            tooltip: 'Approve',
+                                            onPressed: busyRequesterUid != null
+                                                ? null
+                                                : () => decide(
+                                                    request,
+                                                    approve: true,
+                                                  ),
+                                            icon: const Icon(Icons.check),
+                                          ),
+                                          IconButton(
+                                            tooltip: 'Decline',
+                                            onPressed: busyRequesterUid != null
+                                                ? null
+                                                : () => decide(
+                                                    request,
+                                                    approve: false,
+                                                  ),
+                                            icon: const Icon(Icons.close),
+                                          ),
+                                        ],
+                                      ),
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
                 ],
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Done'),
-          ),
-        ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: busyRequesterUid == null
+                    ? () => Navigator.of(dialogContext).pop()
+                    : null,
+                child: const Text('Done'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -396,6 +479,8 @@ class _RoomsScreenState extends State<RoomsScreen> {
   // column, 14px padding, left-aligned content.
   Future<bool?> _confirmLeaveRoom(ChatRoom room) {
     final lastPerson = room.members.length == 1;
+    final deleteForEveryone = room.online && !room.guest && _isRoomOwner(room);
+    final deleteLastGuestRoom = room.online && room.guest && lastPerson;
 
     return showDialog<bool>(
       context: context,
@@ -432,7 +517,20 @@ class _RoomsScreenState extends State<RoomsScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    lastPerson
+                    deleteForEveryone
+                        ? 'You are the room owner. Leaving will permanently '
+                              'delete this room, all messages, and pending '
+                              'join requests for everyone. The other person '
+                              'will lose access to the conversation. This '
+                              'cannot be undone.'
+                        : deleteLastGuestRoom
+                        ? 'You are the last person in this closed guest chat. '
+                              'Leaving will delete the room and its messages.'
+                        : room.online && room.guest
+                        ? 'Leaving will close this guest chat. The other '
+                              'person can still read the existing messages, '
+                              'but no one can send new ones.'
+                        : lastPerson
                         ? 'Nobody else is in this room, so the room and all '
                               'its messages will be deleted.'
                         : 'Your messages will stay for your roommate. The room '
@@ -448,7 +546,13 @@ class _RoomsScreenState extends State<RoomsScreen> {
                         foregroundColor: colors.onError,
                       ),
                       onPressed: () => Navigator.of(dialogContext).pop(true),
-                      child: const Text('Leave'),
+                      child: Text(
+                        deleteForEveryone
+                            ? 'Delete room for everyone'
+                            : deleteLastGuestRoom
+                            ? 'Delete guest chat'
+                            : 'Leave',
+                      ),
                     ),
                   ),
                   const SizedBox(height: 8),

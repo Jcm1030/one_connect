@@ -4,6 +4,7 @@ import 'package:oneconnect/accounts/account_service.dart';
 import 'package:oneconnect/app_state.dart';
 import 'package:oneconnect/models/profile.dart';
 import 'package:oneconnect/screens/account_screen.dart';
+import 'package:oneconnect/screens/profile_screen.dart';
 import 'package:oneconnect/screens/rooms_screen.dart';
 import 'package:oneconnect/screens/sign_in_screen.dart';
 
@@ -43,7 +44,7 @@ void main() {
     expect(find.byType(TextFormField), findsNWidgets(2)); // email, password
   });
 
-  testWidgets('sign out returns to sign in and resumes the matching profile', (
+  testWidgets('sign out requires profile confirmation after signing in again', (
     tester,
   ) async {
     useTallScreen(tester);
@@ -62,6 +63,13 @@ void main() {
     await tester.enterText(fields.at(0), 'ana@example.com');
     await tester.enterText(fields.at(1), 'a long password');
     await tester.tap(find.widgetWithText(FilledButton, 'Sign In'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ProfileScreen), findsOneWidget);
+    expect(find.byType(RoomsScreen), findsNothing);
+    expect(appState.currentUser, isNull);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Continue'));
     await tester.pumpAndSettle();
 
     expect(appState.currentUser, same(ana));

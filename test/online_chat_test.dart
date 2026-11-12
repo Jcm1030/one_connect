@@ -22,6 +22,7 @@ class _FakeOnlineChatService implements OnlineChatService {
   String? sentReplyToId;
   final List<String> seenMessageIds = [];
   final List<String?> reactions = [];
+  final Map<String, String> usernamesByUid = {};
 
   @override
   Future<void> createRoom({
@@ -108,6 +109,9 @@ class _FakeOnlineChatService implements OnlineChatService {
   Future<void> declineTalkRequest(TalkRequest request) async {}
 
   @override
+  Future<String?> lookupUsername(String uid) async => usernamesByUid[uid];
+
+  @override
   Stream<List<TalkRequest>> watchIncomingTalkRequests() =>
       Stream.value(const []);
 
@@ -121,6 +125,17 @@ class _StreamingFakeOnlineChatService extends _FakeOnlineChatService {
 
   @override
   Stream<List<OnlineRoom>> watchMyRooms() => roomUpdates.stream;
+}
+
+class _MessagingStreamingFakeOnlineChatService
+    extends _StreamingFakeOnlineChatService {
+  final messageUpdates = StreamController<List<EncryptedChatMessage>>.broadcast(
+    sync: true,
+  );
+
+  @override
+  Stream<List<EncryptedChatMessage>> watchMessages(String code) =>
+      messageUpdates.stream;
 }
 
 class _CreatingStreamingFakeOnlineChatService
@@ -144,6 +159,17 @@ class _CreatingStreamingFakeOnlineChatService
 }
 
 void main() {
+  test('online room member usernames are normalized for Firestore rules', () {
+    const member = OnlineRoomMember(
+      uid: 'ana-account',
+      displayName: 'Ana',
+      username: 'Ana_User',
+      publicKey: 'public-key',
+    );
+
+    expect(member.toMap()['username'], 'ana_user');
+  });
+
   test('ownership transfers to the roommate when the creator leaves', () {
     const room = OnlineRoom(
       code: 'ABC234',
@@ -170,6 +196,7 @@ void main() {
 
   test('online room updates preserve the active room instance', () async {
     final service = _StreamingFakeOnlineChatService();
+    service.usernamesByUid['ben-account'] = 'ben';
     final keyStore = MemoryKeyStore();
     final ana = Profile(
       name: 'Ana',
@@ -196,6 +223,11 @@ void main() {
             displayName: 'Ana',
             publicKey: publicKey,
           ),
+          'ben-account': const OnlineRoomMember(
+            uid: 'ben-account',
+            displayName: 'Ben',
+            publicKey: 'ben-public-key',
+          ),
         },
         verifiedUids: const [],
         closed: false,
@@ -203,6 +235,12 @@ void main() {
     ]);
     await Future<void>.delayed(Duration.zero);
     final activeRoom = appState.rooms.single;
+    expect(
+      activeRoom.members
+          .singleWhere((member) => member.accountId == 'ben-account')
+          .username,
+      'ben',
+    );
 
     service.roomUpdates.add([
       OnlineRoom(
@@ -224,6 +262,84 @@ void main() {
     expect(identical(appState.rooms.single, activeRoom), isTrue);
     expect(activeRoom.keyVerifiedUids, contains(service.currentUid));
   });
+
+  test(
+    'a joining member sees an accepted guest room and its messages',
+    () async {
+      final service = _MessagingStreamingFakeOnlineChatService()
+        ..currentUid = 'ben-account';
+      final keyStore = MemoryKeyStore();
+      final ben = Profile(
+        name: 'Ben',
+        username: 'ben',
+        accountId: service.currentUid,
+      );
+      final appState = AppState(
+        FakeStore(),
+        keyStore: keyStore,
+        onlineChatService: service,
+      )..currentUser = ben;
+      addTearDown(appState.dispose);
+      addTearDown(service.roomUpdates.close);
+      addTearDown(service.messageUpdates.close);
+
+      await appState.startOnlineSync();
+      final benKeys = keyStore.keys[service.currentUid]!;
+      final anaKeys = await MessageCrypto().generateKeys();
+      service.roomUpdates.add([
+        OnlineRoom(
+          code: 'GUEST1',
+          ownerUid: 'ana-account',
+          members: {
+            'ana-account': OnlineRoomMember(
+              uid: 'ana-account',
+              displayName: 'Ana',
+              username: 'ana',
+              publicKey: anaKeys.publicKeyText,
+            ),
+            service.currentUid: OnlineRoomMember(
+              uid: service.currentUid,
+              displayName: 'Ben',
+              username: 'ben',
+              publicKey: benKeys.publicKeyText,
+            ),
+          },
+          verifiedUids: const [],
+          closed: false,
+          guest: true,
+        ),
+      ]);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(appState.myGuestRooms, hasLength(1));
+      final room = appState.myGuestRooms.single;
+      final roomKey = await MessageCrypto().deriveRoomKey(
+        mine: anaKeys,
+        otherPublicKey: benKeys.publicKeyBytes,
+        roomId: room.code,
+      );
+      const messageId = 'guest-message';
+      final ciphertext = await MessageCrypto().encrypt(
+        key: roomKey,
+        text: 'Hello Ben',
+        messageId: messageId,
+        senderId: 'ana-account',
+      );
+      service.messageUpdates.add([
+        EncryptedChatMessage(
+          id: messageId,
+          senderUid: 'ana-account',
+          ciphertext: ciphertext,
+          sentAt: DateTime.now(),
+          seenBy: const [],
+        ),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(room.messages.single.text, 'Hello Ben');
+      expect(appState.onlineError, isNull);
+    },
+  );
 
   test(
     'creating an online room does not duplicate its synchronous room update',
@@ -271,6 +387,7 @@ void main() {
     expect(room!.online, true);
     expect(room.members, contains(ana));
     expect(service.createdOwner?.uid, service.currentUid);
+    expect(service.createdOwner?.username, ana.username);
     expect(service.createdOwner?.publicKey, isNotEmpty);
     expect(
       service.createdOwner?.publicKey,

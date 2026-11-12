@@ -75,6 +75,26 @@ void main() {
     expect(find.byTooltip('More options'), findsOneWidget);
   });
 
+  testWidgets('guest chat tells the remaining member when the other leaves', (
+    tester,
+  ) async {
+    await tester.pumpWidget(screen());
+
+    room
+      ..online = true
+      ..guest = true
+      ..closed = true;
+    appState.notifyListeners();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Guest room closed'), findsOneWidget);
+    expect(find.textContaining('left the guest room'), findsOneWidget);
+
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+    expect(find.text('Guest room closed'), findsNothing);
+  });
+
   testWidgets('focusing the message box scrolls to the latest message', (
     tester,
   ) async {

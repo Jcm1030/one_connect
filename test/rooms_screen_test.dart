@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -21,10 +22,30 @@ class _FakeOnlineChatService extends Fake implements OnlineChatService {
 
   final pendingRequests = StreamController<List<OnlineJoinRequest>>.broadcast();
   String? leftRoomCode;
+  String? decidedRequesterUid;
+  bool? approved;
+  Object? decisionError;
+  int watchJoinRequestsCalls = 0;
 
   @override
-  Stream<List<OnlineJoinRequest>> watchJoinRequests(String code) =>
-      pendingRequests.stream;
+  Stream<List<OnlineJoinRequest>> watchJoinRequests(String code) {
+    watchJoinRequestsCalls++;
+    return pendingRequests.stream;
+  }
+
+  @override
+  Future<void> decideJoinRequest({
+    required String code,
+    required String requesterUid,
+    required bool approve,
+  }) async {
+    decidedRequesterUid = requesterUid;
+    approved = approve;
+    final error = decisionError;
+    if (error != null) {
+      throw error;
+    }
+  }
 
   @override
   Future<void> leaveRoom(String code) async {
@@ -202,6 +223,62 @@ void main() {
     expect(find.text('You left room ABC234.'), findsOneWidget);
   });
 
+  testWidgets('an online room owner gets a permanent-delete warning', (
+    tester,
+  ) async {
+    final service = _FakeOnlineChatService();
+    ana.accountId = service.currentUid;
+    appState = AppState(FakeStore(), onlineChatService: service)
+      ..profiles.addAll([ana, ben])
+      ..currentUser = ana;
+    addTearDown(appState.dispose);
+    final room = ChatRoom.withCode('ABC234')
+      ..online = true
+      ..ownerUid = service.currentUid
+      ..members.addAll([ana, ben]);
+    appState.rooms.add(room);
+
+    await tester.pumpWidget(screen());
+    await tester.tap(find.byIcon(Icons.logout));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('permanently delete this room, all messages'),
+      findsOneWidget,
+    );
+    expect(find.text('Delete room for everyone'), findsOneWidget);
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(service.leftRoomCode, isNull);
+  });
+
+  testWidgets(
+    'leaving a guest room does not show the permanent-delete warning',
+    (tester) async {
+      final service = _FakeOnlineChatService();
+      ana.accountId = service.currentUid;
+      appState = AppState(FakeStore(), onlineChatService: service)
+        ..profiles.addAll([ana, ben])
+        ..currentUser = ana;
+      addTearDown(appState.dispose);
+      final room = ChatRoom.withCode('ABC234')
+        ..online = true
+        ..guest = true
+        ..ownerUid = service.currentUid
+        ..members.addAll([ana, ben]);
+      appState.rooms.add(room);
+
+      await tester.pumpWidget(screen());
+      await tester.tap(find.byTooltip('Leave guest chat'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Delete room for everyone'), findsNothing);
+      expect(find.text('Leave'), findsOneWidget);
+      expect(find.textContaining('close this guest chat'), findsOneWidget);
+    },
+  );
+
   testWidgets('the online room owner is identified in the room list', (
     tester,
   ) async {
@@ -301,6 +378,7 @@ void main() {
       const OnlineJoinRequest(
         requesterUid: 'ben-account',
         displayName: 'Ben',
+        username: 'ben',
         publicKey: 'public-key',
       ),
     ]);
@@ -312,6 +390,58 @@ void main() {
     await tester.pump();
 
     expect(tester.widget<GlowPulse>(glow).active, false);
+  });
+
+  testWidgets('approval errors are shown in the join requests dialog', (
+    tester,
+  ) async {
+    final service = _FakeOnlineChatService()
+      ..decisionError = FirebaseException(
+        plugin: 'cloud_firestore',
+        code: 'permission-denied',
+        message: 'Missing or insufficient permissions.',
+      );
+    addTearDown(service.pendingRequests.close);
+    ana.accountId = service.currentUid;
+    appState = AppState(FakeStore(), onlineChatService: service)
+      ..profiles.addAll([ana, ben])
+      ..currentUser = ana;
+    addTearDown(appState.dispose);
+    final room = ChatRoom.withCode('ABC234')
+      ..online = true
+      ..ownerUid = service.currentUid
+      ..members.add(ana);
+    appState.rooms.add(room);
+
+    await tester.pumpWidget(screen());
+    final initialWatchCount = service.watchJoinRequestsCalls;
+    await tester.tap(find.byTooltip('Join requests'));
+    await tester.pump();
+    expect(service.watchJoinRequestsCalls, initialWatchCount + 1);
+    service.pendingRequests.add([
+      const OnlineJoinRequest(
+        requesterUid: 'ben-account',
+        displayName: 'Ben',
+        username: 'ben',
+        publicKey: 'public-key',
+      ),
+    ]);
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Approve'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(service.decidedRequesterUid, 'ben-account');
+    expect(service.approved, true);
+    expect(find.text('@ben wants to join'), findsOneWidget);
+    expect(
+      find.text(
+        'Could not update join request: Missing or insufficient permissions.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Join requests for ABC234'), findsOneWidget);
   });
 
   testWidgets('a person who is already in a room is told to leave it first', (
